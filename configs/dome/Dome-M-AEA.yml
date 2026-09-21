@@ -30,13 +30,38 @@ optimizer:
 
   lr: 0.0002
   betas: [0.9, 0.999]
-  weight_decay: 0.000065
+  # 628 training tiles: overfitting, not underfitting, is the risk here.
+  weight_decay: 0.000125
 
 
-# Increase to search for the optimal ema
+# ~157 steps/epoch at batch 4, so decay late rather than never (the inherited
+# milestones of [80, 120] with gamma 0.8 barely move the lr at all).
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [100, 140]
+  gamma: 0.5
+
+
+# 0.9999 is tuned for COCO, where its ~10k-step horizon is under one epoch. Here
+# 10k steps is ~64 epochs, so the averaged weights would lag most of the run;
+# 0.998 gives a ~3 epoch horizon instead.
+ema:
+  decay: 0.998
+  warmups: 500
+
+
+# Augmentation for 1 m/px nadir imagery of 5-20 m boats: objects are 4-12 px, a
+# tile holds ~1.9 of them, and the ground sample distance is fixed.
+#   - apparent size is a *feature*: never shrink the tile (RandomZoomOut, which
+#     the COCO recipe applies to half the images at up to 4x, would leave boats
+#     at 2-3 px), only magnify
+#   - orientation carries no information: the full 8-fold dihedral group, taken
+#     exactly, without resampling
+#   - positives are scarce: copy-paste the tile's own boats onto its own water
+#   - what does vary between scenes is illumination, sea state and sharpness
 train_dataloader:
-  num_workers: 0
-  total_batch_size: 4
+  num_workers: 4
+  total_batch_size: 8
   dataset:
     img_folder: "~/Data/datasets/AEA/images/train"
     ann_file: "~/Data/datasets/AEA/annotations/train_coco.json"
@@ -52,18 +77,25 @@ train_dataloader:
         - { type: ConvertPILImage, dtype: 'float32', scale: True }
         - { type: ConvertBoxes, fmt: 'cxcywh', normalize: True }
       policy:
-        epoch: 100
+        name: stop_epoch
+        epoch: 100  # last 60 epochs train on the real distribution
+        # Flips and rotations stay on: they are exact symmetries of the scene,
+        # not distortions, so there is nothing to anneal away.
+        ops: ['CopyPasteSmallObjects', 'RandomZoomCrop', 'RandomColorJitter', 'RandomGaussianBlur']
   collate_fn:
-    stop_epoch: 100
+    stop_epoch: 100  # same point; also where stage 2 (best_stg2, EMA restart) begins
     base_size: 1024
-    base_size_repeat: 4
-    ema_restart_decay: 0.9999
+    # Batch multi-scale off: it resizes the whole batch to 768-1280, and the
+    # 768/896 draws shrink a 6 px boat below the stride-4 grid. Scale jitter now
+    # comes from RandomZoomCrop, which only ever magnifies.
+    base_size_repeat: ~
+    ema_restart_decay: 0.999
     mwas_window_size: 16
 
 
 val_dataloader:
   num_workers: 4
-  total_batch_size: 8
+  total_batch_size: 16
   dataset:
     transforms:
       ops:

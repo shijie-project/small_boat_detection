@@ -1,0 +1,5 @@
+# AEA small-boat recipe (include/aea.yml) on the S architecture;
+# fine-tune from Dome-S-AITOD-best.pth.
+__include__: ["Dome-S-AITOD.yml", "include/aea.yml"]
+
+output_dir: ./output/dome-s-aea

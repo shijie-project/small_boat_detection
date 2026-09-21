@@ -4,19 +4,20 @@
 # eval.log is written next to the checkpoint so the run and its log live together.
 #
 #   bash scripts/dist_test_aea.sh [size]
-#       size : s | m | l   (default s)
+#       size : s | m | l   (default m)
 #
-#   config   : configs/dome/Dome-M-AEA.yml          (override: CONFIG=...)
-#   checkpoint (-r) : ckpts/Dome-<size>-AEA-best.pth (override: CKPT=...)
+#   config   : configs/dome/Dome-<SIZE>-AEA.yml     (override: CONFIG=...)
+#   checkpoint (-r) : ckpts/Dome-<SIZE>-AEA-best.pth (override: CKPT=...)
 cd "$(dirname "$0")/.." || exit 1
 
-# --- model size (positional arg, default s) ---------------------------------
-MODEL_SIZE=${1:-${MODEL_SIZE:-s}}
+# --- model size (positional arg, default m) ---------------------------------
+MODEL_SIZE=${1:-${MODEL_SIZE:-m}}
 MODEL_SIZE=$(echo "$MODEL_SIZE" | tr '[:upper:]' '[:lower:]')
 case "$MODEL_SIZE" in
   s|m|l) ;;
   *) echo "ERROR: model size must be s, m, or l (got '$MODEL_SIZE')"; exit 1 ;;
 esac
+SIZE=$(echo "$MODEL_SIZE" | tr '[:lower:]' '[:upper:]')  # the S / M / L in the file names
 
 export CUDA_VISIBLE_DEVICES=0
 
@@ -33,8 +34,8 @@ done
 echo "[py] using ${PYTHON} ($("$PYTHON" -c 'import sys;print("Python %d.%d.%d"%sys.version_info[:3])' 2>/dev/null))"
 
 # derive config + checkpoint from the model size (both overridable)
-CONFIG=${CONFIG:-./configs/dome/Dome-M-AEA.yml}
-CKPT=${CKPT:-./ckpts/Dome-M-AEA-best.pth}
+CONFIG=${CONFIG:-./configs/dome/Dome-${SIZE}-AEA.yml}
+CKPT=${CKPT:-./ckpts/Dome-${SIZE}-AEA-best.pth}
 [ -f "$CONFIG" ] || { echo "ERROR: config not found: $CONFIG"; exit 1; }
 [ -f "$CKPT" ]   || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }
 

@@ -210,3 +210,6 @@ __marimo__/
 
 # Data outputs (GFW exports, per-image metrics tables)
 *.csv
+
+# Dome pretrained checkpoints the webui fine-tunes from (~1 GB)
+/dome_ckpts/

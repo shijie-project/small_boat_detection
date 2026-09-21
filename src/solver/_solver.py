@@ -176,8 +176,32 @@ class BaseSolver:
         except Exception:
             stat, infos = self._matched_state(module.state_dict(), pretrain_state_dict)
 
+        self._check_tuning_fit(module.state_dict(), stat, infos, path)
         module.load_state_dict(stat, strict=False)
         print(f"Load model.state_dict, {infos}")
+
+    def _check_tuning_fit(self, model_state, loaded, infos, path):
+        """Refuse a tuning checkpoint that mostly does not fit the model.
+
+        Loading keeps only the tensors whose shapes match and skips the rest, so a
+        checkpoint of another size (an L checkpoint for an M config) would
+        quietly train from little more than scratch. A different class count only
+        touches the small heads; a wrong-shaped backbone tensor, or under 90% of
+        the weights arriving, means the wrong model. ``tuning_partial: True`` in
+        the config allows it on purpose.
+        """
+        if getattr(self.cfg, "yaml_cfg", {}).get("tuning_partial", False):
+            return
+        total = sum(v.numel() for v in model_state.values())
+        fraction = sum(v.numel() for v in loaded.values()) / max(total, 1)
+        backbone = [k for k in infos["unmatched"] if k.startswith("backbone.")]
+        if backbone or fraction < 0.9:
+            raise SystemExit(
+                f"tuning checkpoint {path} does not fit this config: only {100 * fraction:.0f}% of the "
+                f"weights load and {len(backbone)} backbone tensor(s) have a different shape "
+                f"(e.g. {(backbone or infos['unmatched'] or ['-'])[0]}). Is it a different model size "
+                f"(S/M/L)? Set `tuning_partial: True` in the config to load the matching part anyway."
+            )
 
     @staticmethod
     def _matched_state(state: dict[str, torch.Tensor], params: dict[str, torch.Tensor]):

@@ -4,7 +4,7 @@ Hot reload -- edit any file under ``webui/`` and the page rebuilds itself:
 
     gradio webui/app.py
 
-Plain run (no reload):
+Plain run (no reload on save; the ⟳ Restart webui button reloads on demand):
 
     python -m webui
 """
@@ -28,6 +28,7 @@ from webui.core.ui import (
     make_clear,
     make_refresh,
     make_rescan,
+    make_restart,
     make_start,
     make_stop,
 )
@@ -86,7 +87,10 @@ def build_ui():
                                     choice_fields.append(field)
                                     choice_components.append(inputs[field.name])
 
-                rescan_button = gr.Button("↻ Rescan", variant="secondary")
+                with gr.Row():
+                    rescan_button = gr.Button("↻ Rescan", variant="secondary")
+                    # Under `gradio webui/app.py` every save already does this.
+                    restart_button = gr.Button("⟳ Restart webui", variant="secondary", visible=not demo.dev_mode)
                 gr.Markdown(f"<sub>root: `{ROOT}`</sub>")
 
             with gr.Column(scale=6) as console_column:
@@ -115,6 +119,8 @@ def build_ui():
             console = consoles[feature.slot]
             button.click(make_start(feature, names), inputs=components, outputs=console)
         rescan_button.click(make_rescan(choice_fields), outputs=choice_components)
+        # The server now serves the rebuilt page; this one is stale, so fetch it.
+        restart_button.click(make_restart(demo)).success(fn=None, js="() => { location.reload(); }")
         # A wide feature takes the whole page: the console it would share the
         # row with is worth less than the pixels while you are working in it.
         for tab, feature in tabs:

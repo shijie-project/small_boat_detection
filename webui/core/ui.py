@@ -7,6 +7,7 @@ shared job runner.
 
 import os
 import re
+import traceback
 from contextlib import nullcontext
 
 import gradio as gr
@@ -14,6 +15,7 @@ import gradio as gr
 from .discovery import options
 from .jobs import job
 from .paths import ROOT
+from .restart import restart
 
 
 LOG_TAIL = 400  # lines kept on screen; the job's own buffer holds far more
@@ -201,3 +203,17 @@ def make_rescan(fields):
         return updates[0] if len(updates) == 1 else updates
 
     return rescan
+
+
+def make_restart(demo):
+    """Rebuild the page from the code on disk; running jobs are left alone."""
+
+    def restart_page():
+        try:
+            restart(demo)
+        except Exception as exc:  # noqa: BLE001 -- the old page stays up, so say why
+            traceback.print_exc()
+            raise gr.Error(f"Restart failed, still on the old code: {exc}") from None
+        print("[webui] restarted: page rebuilt from the code on disk", flush=True)
+
+    return restart_page

@@ -10,6 +10,15 @@ python webui/webui.py    # same thing
 # http://127.0.0.1:8000  (override with WEBUI_HOST / WEBUI_PORT)
 ```
 
+A plain run never re-reads its source, so refreshing the browser after an edit shows the
+old page. **⟳ Restart webui** (under the tabs) fixes that without killing anything: it
+drops every `webui` module, imports the app again and swaps the new page into the server
+that is already listening, then reloads the browser tab. Running jobs keep going and keep
+their consoles, as they do across a hot reload. If the new code fails to import, the old
+page stays up and the error shows as a toast, with the traceback in the server's console.
+Other browser tabs on the dashboard need a refresh of their own. The button is hidden
+under `gradio webui/app.py`, where every save already does this.
+
 Jobs run from the project root, one per **slot**. A slot is what a feature competes with:
 train and test share `run` and are serialised, because they both want every GPU; Label
 Studio wants none, so it sits in `service` and can stay up across any number of training
@@ -34,6 +43,7 @@ webui/
 │   ├── paths.py           project root, config/ckpt/data dirs, safe path resolution
 │   ├── discovery.py       what fills the dropdowns
 │   ├── jobs.py            the slots, one subprocess each + its log ring buffer
+│   ├── restart.py         ⟳ Restart webui: re-import the package, swap the page in place
 │   └── ui.py              field rendering, console, start/stop wiring
 └── features/              one module per tab
     ├── base.py            Feature/Field/JobSpec + the argument handling train & test share

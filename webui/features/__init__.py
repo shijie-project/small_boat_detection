@@ -9,6 +9,7 @@ from .inference import InferenceFeature
 from .label_studio import LabelStudioFeature
 from .ls_coco import LabelStudioCocoFeature
 from .ls_import import LabelStudioImportFeature
+from .ls_review import LabelStudioReviewFeature
 from .manual_split import ManualSplitFeature
 from .split_coco import SplitFeature
 from .test import TestFeature
@@ -24,6 +25,7 @@ FEATURES = [
     InferenceFeature(),
     LabelStudioFeature(),
     LabelStudioImportFeature(),
+    LabelStudioReviewFeature(),
     LabelStudioCocoFeature(),
     SplitFeature(),
 ]

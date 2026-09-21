@@ -33,7 +33,7 @@ done
 echo "[py] using ${PYTHON} ($("$PYTHON" -c 'import sys;print("Python %d.%d.%d"%sys.version_info[:3])' 2>/dev/null))"
 
 # derive config + checkpoint from the model size (both overridable)
-CONFIG=${CONFIG:-./configs/dome/Dome-M-AEA-test.yml}
+CONFIG=${CONFIG:-./configs/dome/Dome-M-AEA.yml}
 CKPT=${CKPT:-./ckpts/Dome-M-AEA-best.pth}
 [ -f "$CONFIG" ] || { echo "ERROR: config not found: $CONFIG"; exit 1; }
 [ -f "$CKPT" ]   || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }

@@ -30,7 +30,7 @@ class TestFeature(Feature):
             "Config (-c)",
             kind="choice",
             source="configs",
-            value="configs/dome/Dome-M-AEA-test.yml",
+            value="configs/dome/Dome-M-AEA.yml",
             prefer="AEA",
         ),
         Field(

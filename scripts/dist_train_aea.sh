@@ -8,7 +8,7 @@
 #       size : s | m | l   (default m)
 #
 #   config : configs/dome/Dome-<SIZE>-AEA.yml      (override: CONFIG=...)
-#   tuning : ckpts/Dome-<SIZE>-AITOD-best.pth      (override: TUNING=...)
+#   tuning : dome_ckpts/Dome-<SIZE>-AITOD-best.pth (override: TUNING=...)
 #   outdir : output/Dome-<SIZE>-AEA/<timestamp>    (override: OUTDIR=...)
 cd "$(dirname "$0")/.." || exit 1
 
@@ -37,7 +37,7 @@ echo "[py] using ${PYTHON} ($("$PYTHON" -c 'import sys;print("Python %d.%d.%d"%s
 
 # derive config + tuning checkpoint from the model size (both overridable)
 CONFIG=${CONFIG:-./configs/dome/Dome-${SIZE}-AEA.yml}
-TUNING=${TUNING:-./ckpts/Dome-${SIZE}-AITOD-best.pth}
+TUNING=${TUNING:-./dome_ckpts/Dome-${SIZE}-AITOD-best.pth}
 [ -f "$CONFIG" ] || { echo "ERROR: config not found: $CONFIG"; exit 1; }
 [ -f "$TUNING" ] || { echo "ERROR: tuning checkpoint not found: $TUNING"; exit 1; }
 

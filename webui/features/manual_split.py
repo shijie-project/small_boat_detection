@@ -8,7 +8,7 @@ an iframe -- the picker owns its own canvas and never goes through Gradio's
 event loop, which is what made the previous attempt unusable.
 
 It is a server, so it stays up until Stop, and it gets its own slot: leaving the
-picker open must not block Label Studio or the tiler.
+picker open must not block Label Studio or the data prep.
 """
 
 import gradio as gr
@@ -50,8 +50,8 @@ class ManualSplitFeature(Feature):
         "The even grid is only a starting point — **shift+drag a cell, or nudge it with "
         "the arrow keys**, and it cuts from where you put it; the offsets are saved in "
         "`layout.json` next to the tiles (on every Apply, or with Save) and come back "
-        "when you reopen the scene. The output is the same `split_images/<stem>/` the "
-        "automatic split writes, so inference reads it either way — and cells cut "
+        "when you reopen the scene. The output is `split_images/<stem>/` plus the "
+        "`tiles.json` manifest, which is what inference reads — and cells cut "
         "earlier show up in blue, with Apply only ever adding to them."
     )
     fields = [

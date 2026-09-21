@@ -13,7 +13,7 @@ from .paths import CKPT_DIRS, CONFIG_DIR, DATA_DIRS, IMAGES_DIR, ROOT, SATELLITE
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
 SPLIT_DIRNAME = "split_images"  # must match tile_satellite.py
 OUT_DIRNAME = "inf_det"  # must match torch_inf_dir.py: holds the predictions we import
-# Output of the tiler and of tiled inference -- thousands of files, never inputs.
+# Output of the picker and of tiled inference -- thousands of files, never inputs.
 SKIP_DIRS = (SPLIT_DIRNAME, "crops")
 
 
@@ -45,11 +45,12 @@ def list_checkpoints():
     return out
 
 
-def list_satellite_images(limit=200):
-    """What the tiler can be pointed at: the whole folder first, then each image.
+def list_satellite_dirs(limit=200):
+    """What the picker can be pointed at: the whole folder first, then each one holding images.
 
-    The purchased imagery arrives nested (``zip files/<order>/<image>.tif``), so
-    this walks the tree -- minus the folders we generate ourselves, which hold
+    The picker takes a folder, not an image, and lists every scene under it. The
+    purchased imagery arrives nested (``zip files/<order>/<image>.tif``), so this
+    walks the tree -- minus the folders we generate ourselves, which hold
     hundreds of crops and are never an input.
     """
     if not SATELLITE_DIR.is_dir():
@@ -57,7 +58,8 @@ def list_satellite_images(limit=200):
     found = [rel(SATELLITE_DIR)]
     for root, dirs, files in os.walk(SATELLITE_DIR):
         dirs[:] = sorted(d for d in dirs if not generated(d))
-        found += [rel(os.path.join(root, f)) for f in sorted(files) if f.lower().endswith(IMAGE_SUFFIXES)]
+        if root != str(SATELLITE_DIR) and any(f.lower().endswith(IMAGE_SUFFIXES) for f in files):
+            found.append(rel(root))
         if len(found) >= limit:
             break
     return found
@@ -163,7 +165,7 @@ def options():
     return {
         "configs": list_configs(),
         "checkpoints": list_checkpoints(),
-        "satellite": list_satellite_images(),
+        "satellite": list_satellite_dirs(),
         "tiles": list_tile_dirs(),
         "predictions": list_prediction_files(),
         "ls_exports": list_ls_exports(),

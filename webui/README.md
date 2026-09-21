@@ -13,9 +13,9 @@ python webui/webui.py    # same thing
 Jobs run from the project root, one per **slot**. A slot is what a feature competes with:
 train and test share `run` and are serialised, because they both want every GPU; Label
 Studio wants none, so it sits in `service` and can stay up across any number of training
-runs; image splitting is CPU work and gets `data`. All three can run at once. The console
-on the right has one tab per slot. Adding a slot is adding a name to `SLOTS` in
-`core/jobs.py` — the layout follows.
+runs; the file conversions are CPU work and get `data`, and the cell picker gets `pick`.
+All four can run at once. The console on the right has one tab per slot. Adding a slot
+is adding a name to `SLOTS` in `core/jobs.py` — the layout follows.
 
 A form has one button, Start. Stop lives in the console tab instead, next to the log of
 the thing it kills: a slot runs one job at a time, so a Stop per feature was several
@@ -39,7 +39,6 @@ webui/
     ├── base.py            Feature/Field/JobSpec + the argument handling train & test share
     ├── train.py
     ├── test.py
-    ├── tile.py            cut satellite imagery into tiles (tools/dataset/tile_satellite.py)
     ├── manual_split.py    the cell picker, served in an iframe (tools/dataset/split_picker.py)
     ├── inference.py       detect on a folder of tiles (tools/inference/torch_inf_dir.py)
     ├── label_studio.py    the annotation server, same as `tools/starter.sh label-studio`
@@ -53,15 +52,16 @@ webui/
 own — the scene as a cached preview to fly over, plus any single cell cropped from the
 original on demand — and the tab is an iframe onto it, so the canvas never goes through
 Gradio's event loop. It gets its own slot (`pick`), so leaving it open blocks nothing, and
-its page only exists once Start has run: the ↻ under the panel reloads the iframe. What
-Apply writes is byte for byte what the automatic split writes, manifest included.
+its page only exists once Start has run: the ↻ under the panel reloads the iframe. Apply
+cuts with `tools/dataset/tile_satellite.py`'s own code, so the tiles and the `tiles.json`
+manifest are exactly what that script would write for the same cells.
 
 A cell can also be moved off its slot (shift+drag, or the arrow keys) so a tile sits over
 the harbour rather than across it. It keeps its `r002_c003` name, `tiles.json` records the
 position it was really cut from — which is the only thing inference reads — and the offsets
 go to `layout.json` beside the tiles, so reopening the scene shows how it was cut.
 
-**Inference** runs on what **Split images** produced, so its dropdown lists tile folders
+**Inference** runs on what **Manual split** produced, so its dropdown lists tile folders
 rather than images: a `split_images/<scene>/`, or `split_images/` itself for every scene at
 once. That second case is the script's `--all`, which the tab always passes when the folder
 holds scenes rather than tiles — a job started from a browser has no stdin, and the script

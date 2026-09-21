@@ -13,14 +13,12 @@ from .ls_review import LabelStudioReviewFeature
 from .manual_split import ManualSplitFeature
 from .split_coco import SplitFeature
 from .test import TestFeature
-from .tile import TileFeature
 from .train import TrainFeature
 
 
 FEATURES = [
     TrainFeature(),
     TestFeature(),
-    TileFeature(),
     ManualSplitFeature(),
     InferenceFeature(),
     LabelStudioFeature(),

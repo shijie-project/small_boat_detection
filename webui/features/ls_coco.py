@@ -7,7 +7,7 @@ put the result straight into an existing dataset (``Merge into``) so the ids
 continue where that file left off instead of clashing with it.
 
 It reads a file and writes a file -- no GPU, no Label Studio server -- so it
-runs in the ``data`` slot alongside the tiler.
+runs in the ``data`` slot with the rest of the data prep.
 """
 
 from ..core.jobs import DATA_SLOT

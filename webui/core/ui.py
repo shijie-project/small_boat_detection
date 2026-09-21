@@ -196,7 +196,7 @@ def make_rescan(fields):
         updates = [gr.update(choices=choices_of(field, opts)[0]) for field in fields]
         gr.Info(
             f"{len(opts['configs'])} configs · {len(opts['checkpoints'])} checkpoints"
-            f" · {len(opts['satellite'])} images · {len(opts['tiles'])} tile folders"
+            f" · {len(opts['satellite'])} image folders · {len(opts['tiles'])} tile folders"
         )
         return updates[0] if len(updates) == 1 else updates
 

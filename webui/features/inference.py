@@ -1,7 +1,7 @@
 """Inference: ``tools/inference/torch_inf_dir.py`` over a folder of cut tiles.
 
-The step after **Split images**. Pick the ``split_images/<scene>/`` folder the
-tiler wrote, pick a checkpoint, and the detector runs over every tile in it and
+The step after **Manual split**. Pick the ``split_images/<scene>/`` folder the
+picker wrote, pick a checkpoint, and the detector runs over every tile in it and
 stitches the boxes back onto the full scene (``tiles.json`` says where each tile
 came from). Results land in ``<folder>/inf_det/``: a ``predictions.json`` in the
 COCO results format the eval and Label Studio tools already read, plus the
@@ -48,7 +48,7 @@ def tile_folder(params):
     """``(value, path, every)`` -- the folder to run on and whether that means all of them."""
     value = text(params, "tiles")
     if not value:
-        raise ValueError("tile folder is required -- cut a scene with Split images first")
+        raise ValueError("tile folder is required -- cut a scene with Manual split first")
     path = resolve(value)
     if path is None:
         raise ValueError(f"tile folder is outside the project: {value}")
@@ -58,7 +58,7 @@ def tile_folder(params):
         return value, path, False
     if any(child.is_dir() and has_tiles(child) for child in path.iterdir()):
         return value, path, True
-    raise ValueError(f"no tiles in {value} -- cut the scene with Split images first")
+    raise ValueError(f"no tiles in {value} -- cut the scene with Manual split first")
 
 
 def class_args(params):

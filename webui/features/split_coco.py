@@ -56,7 +56,7 @@ def source_dir(params, key="images"):
 
 
 class SplitFeature(Feature):
-    # "Split images" is the tiler; this one cuts the dataset in two.
+    # "Manual split" cuts scenes into tiles; this one cuts the dataset in two.
     name = "train-val"
     label = "Train / Val"
     slot = DATA_SLOT

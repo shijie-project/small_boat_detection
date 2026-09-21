@@ -7,7 +7,7 @@ and served through a single ``/api/options`` endpoint.
 import os
 import sys
 
-from .paths import CKPT_DIRS, CONFIG_DIR, DATA_DIRS, IMAGES_DIR, ROOT, SATELLITE_DIR, rel
+from .paths import CKPT_DIRS, CONFIG_DIR, DATA_DIRS, DOME_CKPT_DIR, IMAGES_DIR, ROOT, SATELLITE_DIR, rel
 
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
@@ -48,6 +48,13 @@ def list_checkpoints():
             rel(p) for p in sorted(CKPT_DIRS.rglob("*.pth")) if p.stem.startswith("best_") or p.stem.endswith("-best")
         )
     return out
+
+
+def list_dome_checkpoints():
+    """The Dome pretrained weights a training run fine-tunes from: ``dome_ckpts/*.pth``."""
+    if not DOME_CKPT_DIR.is_dir():
+        return []
+    return [rel(p) for p in sorted(DOME_CKPT_DIR.glob("*.pth"))]
 
 
 def list_satellite_dirs(limit=200):
@@ -171,6 +178,7 @@ def options():
         "configs": list_configs(),
         "aea_configs": list_aea_configs(),
         "checkpoints": list_checkpoints(),
+        "dome_checkpoints": list_dome_checkpoints(),
         "satellite": list_satellite_dirs(),
         "tiles": list_tile_dirs(),
         "predictions": list_prediction_files(),

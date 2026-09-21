@@ -1,9 +1,9 @@
 """Train: ``train.py -c <config> [-t <ckpt>]``, mirroring scripts/dist_train.sh.
 
-The tuning checkpoint follows the config: picking ``Dome-M-*.yml`` selects
-``Dome-M-AITOD-best.pth``, ``Dome-L-*.yml`` selects ``Dome-L-AITOD-best.pth``
-(the Dome pretrained weights of that size), and a size with no such checkpoint
-falls back to training from scratch. Any other checkpoint can still be picked by
+The tuning checkpoint comes from ``dome_ckpts/`` and follows the config:
+picking ``Dome-M-*.yml`` selects ``Dome-M-AITOD-best.pth``, ``Dome-L-*.yml``
+``Dome-L-AITOD-best.pth`` (the Dome pretrained weights of that size), and a
+size with no such checkpoint falls back to training from scratch. Any other checkpoint can still be picked by
 hand; one whose name says a different size than the config is refused.
 """
 
@@ -11,7 +11,7 @@ import dataclasses
 import re
 from pathlib import Path
 
-from ..core.discovery import list_checkpoints
+from ..core.discovery import list_dome_checkpoints
 from .base import (
     Feature,
     Field,
@@ -49,8 +49,8 @@ class TrainFeature(Feature):
     name = "train"
     label = "Train"
     description = (
-        "Start a training run. The tuning checkpoint follows the config: Dome-M → "
-        "`Dome-M-AITOD-best.pth`, Dome-L → `Dome-L-AITOD-best.pth` (from scratch when "
+        "Start a training run. The tuning checkpoint comes from `dome_ckpts/` and follows "
+        "the config: Dome-S / M / L → `Dome-<size>-AITOD-best.pth` (from scratch when "
         "there is none for that size). Pick another by hand, or *(none)* to train from scratch."
     )
     fields = [
@@ -66,7 +66,7 @@ class TrainFeature(Feature):
             "checkpoint",
             "Tuning checkpoint (-t, optional)",
             kind="choice",
-            source="checkpoints",
+            source="dome_checkpoints",
             optional=True,
             empty_label="(none / from scratch)",
         ),
@@ -82,11 +82,13 @@ class TrainFeature(Feature):
         config_field = self.fields[0]
         start_config = default_of(config_field, list(options.get(config_field.source, [])))
         fields = list(self.fields)
-        fields[1] = dataclasses.replace(fields[1], value=pretrained_for(start_config, options.get("checkpoints", [])))
+        fields[1] = dataclasses.replace(
+            fields[1], value=pretrained_for(start_config, options.get(fields[1].source, []))
+        )
         inputs = render_fields(fields, options)
 
         def follow(config):
-            return gr.update(value=pretrained_for(config, list_checkpoints()))
+            return gr.update(value=pretrained_for(config, list_dome_checkpoints()))
 
         inputs["config"].change(follow, inputs=inputs["config"], outputs=inputs["checkpoint"])
         return inputs

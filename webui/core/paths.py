@@ -15,6 +15,7 @@ STATIC_DIR = PACKAGE_DIR / "static"
 
 CONFIG_DIR = ROOT / "configs" / "dome"
 CKPT_DIRS = ROOT.parent / "ckpts"
+DOME_CKPT_DIR = ROOT / "dome_ckpts"  # the Dome pretrained weights training fine-tunes from
 DATA_DIRS = ROOT.parent / "data"
 SATELLITE_DIR = DATA_DIRS / "satellite_images"
 IMAGES_DIR = DATA_DIRS / "images"

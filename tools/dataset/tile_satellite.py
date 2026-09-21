@@ -8,9 +8,8 @@ and the annotator both need.
 
 Most of a satellite scene is empty water, so the whole grid is usually far more
 tiles than anybody wants to annotate. ``--regions`` cuts only the rectangles
-you marked by hand (the dashboard's *Manual split* tab draws them and writes
-the file); everything else about the cut -- resolution, padding, the manifest
--- is unchanged.
+listed in a JSON file you write yourself; everything else about the cut --
+resolution, padding, the manifest -- is unchanged.
 
 Padding is never materialised: each tile is a black ``tile x tile`` canvas with
 the real content pasted top-left, so only the edge tiles carry any padding and
@@ -196,9 +195,9 @@ def clip_regions(regions, width, height):
 def load_regions(path):
     """``{stem: [region, ...]}`` from the regions file, or ``None`` if unused.
 
-    Two shapes are accepted: ``{"regions": [...]}``, what the dashboard writes
-    for the one image it was showing, and ``{"images": {stem: [...]}}`` for a
-    whole folder marked up in one go. A bare list is read as the first.
+    Two shapes are accepted: ``{"regions": [...]}`` for a single image, and
+    ``{"images": {stem: [...]}}`` for a whole folder marked up in one go. A
+    bare list is read as the first.
     """
     if not path:
         return None
@@ -382,8 +381,8 @@ def collect(target, recursive):
     if not os.path.isdir(target):
         raise SystemExit(f"no such file or directory: {target}")
 
-    def keep(name):  # never descend into our own output or an inference run
-        return name not in SKIP_DIRS and "_det" not in name
+    def keep(name):  # never descend into our own output, an inference run, or a cache
+        return name not in SKIP_DIRS and "_det" not in name and not name.startswith(".")
 
     found = []
     for root, dirs, files in os.walk(target):
@@ -473,9 +472,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--regions",
         default=None,
-        help="JSON of hand-drawn rectangles to cut instead of the full grid "
-        "(the dashboard's Manual split tab writes it); images it does not "
-        "mention are skipped",
+        help="JSON of rectangles to cut instead of the full grid; images it does not mention are skipped",
     )
     parser.add_argument(
         "--whole-regions",

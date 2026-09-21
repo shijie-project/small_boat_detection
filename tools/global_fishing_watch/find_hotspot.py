@@ -46,7 +46,7 @@ import pandas as pd
 ACCESS_TOKEN = os.environ.get("GFW_API_TOKEN", "<PASTE_YOUR_GFW_API_ACCESS_TOKEN_HERE>")
 COUNTRY_NAME = "Australia"
 START_DATE = "2023-01-01"
-END_DATE = "2023-12-31"
+END_DATE = "2023-01-31"
 
 CORE_LEN = 10.0  # < 10m  -> core target
 MAX_LEN = 24.0  # < 24m  -> included; >= 24m dropped
@@ -167,7 +167,7 @@ async def lookup_eez_id(client, country):
 # ============================================================
 async def fetch_events(client, eez):
     print(f"[2/5] Fetching fishing events {START_DATE}..{END_DATE} ...")
-    res = await client.events.get_events(  # ADJUST
+    res = await client.events.get_all_events(  # ADJUST
         datasets=["public-global-fishing-events:latest"],  # ADJUST
         start_date=START_DATE,
         end_date=END_DATE,
@@ -285,16 +285,12 @@ async def enrich_length(client, ev):
                 datasets=["public-global-vessel-identity:latest"],
             )
             entries = _extract_entries(resp)
-            for entry in entries:
+            for i, entry in enumerate(entries):
+                vid = start + i
                 d = coerce_obj(entry)
-                # the vessel id we matched on may appear under a few keys
-                vid = get_nested(d, ["id", "vesselId", "vessel_id"]) or get_nested(
-                    coerce_obj(get_nested(d, ["selfReportedInfo"]) or [{}][0]), ["id"]
-                )
                 L, T = _dig_length_tonnage(d)
-                if vid is not None:
-                    length_map[str(vid)] = L
-                    tonnage_map[str(vid)] = T
+                length_map[str(vid)] = L
+                tonnage_map[str(vid)] = T
         except Exception as e:
             print(f"    batch {start // BATCH_SIZE} failed: {e}")
         print(f"    queried {min(start + BATCH_SIZE, len(vids))}/{len(vids)}")
@@ -426,8 +422,14 @@ async def main():
     client = gfw.Client(access_token=ACCESS_TOKEN)
 
     eez = await lookup_eez_id(client, COUNTRY_NAME)
-    ev = await fetch_events(client, eez)
-    ev.to_csv("gfw_raw_events.csv", index=False)
+
+    raw_event_csv = f"gfw_raw_events_{eez}.csv"
+    if not os.path.isfile(raw_event_csv):
+        ev = await fetch_events(client, eez)
+        ev.to_csv(raw_event_csv, index=False)
+    else:
+        ev = pd.read_csv(raw_event_csv)
+
     ev = await enrich_length(client, ev)
     ev.to_csv("gfw_events_with_length.csv", index=False)
     df = prep(ev)

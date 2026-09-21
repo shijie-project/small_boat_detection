@@ -49,8 +49,6 @@ from torchvision.ops import batched_nms
 # huge satellite images exceed PIL's default decompression-bomb guard
 Image.MAX_IMAGE_PIXELS = None
 
-INPUT_SIZE = 1024  # network input size, same as torch_inf.py
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 from src.core import YAMLConfig
 
@@ -115,7 +113,7 @@ def run_tiles(model, device, img, args, crops_dir=None):
     coordinates), so each crop's raw result can be inspected on its own.
     """
     W, H = img.size
-    to_tensor = T.Compose([T.Resize((INPUT_SIZE, INPUT_SIZE)), T.ToTensor()])
+    to_tensor = T.Compose([T.Resize((args.input_size, args.input_size)), T.ToTensor()])
 
     windows = list(gen_windows(W, H, args.tile, args.overlap))
     print(f"Image {W}x{H} -> {len(windows)} tiles (tile={args.tile}, pad={args.pad}, overlap={args.overlap})")
@@ -135,6 +133,12 @@ def run_tiles(model, device, img, args, crops_dir=None):
             b, s, l = boxes[bi], scores[bi], labels[bi]
             keep = s > args.thrh
             b, s, l = b[keep], s[keep], l[keep]
+            # keep only the requested class(es), drop everything else
+            if args.classes is not None and b.numel():
+                cls_keep = torch.zeros_like(l, dtype=torch.bool)
+                for c in args.classes:
+                    cls_keep |= l == c
+                b, s, l = b[cls_keep], s[cls_keep], l[cls_keep]
             # discard boxes whose center falls in the zero-padded region
             if b.numel():
                 cx = (b[:, 0] + b[:, 2]) / 2
@@ -236,9 +240,25 @@ if __name__ == "__main__":
     p.add_argument("-i", "--input", type=str, required=True)
     p.add_argument("-d", "--device", type=str, default="cuda")
     p.add_argument("--tile", type=int, default=1024, help="content crop size")
-    p.add_argument("--pad", type=int, default=1024, help="padded canvas size fed to net")
+    p.add_argument("--pad", type=int, default=1024, help="padded canvas size (postprocessor rescales boxes to this)")
+    p.add_argument(
+        "--input_size",
+        type=int,
+        default=1024,
+        help="size actually fed to the net; MUST match the config's eval_spatial_size "
+        "(e.g. 800 for Dome-M-AITOD). Set --tile --pad --input_size all equal to keep "
+        "content at original resolution with no resize.",
+    )
     p.add_argument("--overlap", type=int, default=24, help="overlap between tiles (px); stride = tile - overlap")
     p.add_argument("--thrh", type=float, default=0.4, help="score threshold")
+    p.add_argument(
+        "--classes",
+        type=int,
+        nargs="+",
+        default=[3],
+        help="only keep these class label(s); default only class 3. Pass e.g. "
+        "--classes 3 for one class, --classes 1 3 for several, or omit for all",
+    )
     p.add_argument("--nms_iou", type=float, default=0.5, help="global NMS IoU")
     p.add_argument("--batch", type=int, default=8, help="tiles per forward pass")
     args = p.parse_args()

@@ -63,7 +63,13 @@ def build_ui():
     slots = slots_of(features)
 
     with gr.Blocks(title=TITLE, fill_width=True) as demo:
-        gr.Markdown(f"### {TITLE} — train / test / annotate")
+        with gr.Row(equal_height=True):
+            gr.Markdown(f"### {TITLE} — train / test / annotate", scale=1)
+            rescan_button = gr.Button("↻ Rescan", variant="secondary", size="sm", scale=0, min_width=110)
+            # Under `gradio webui/app.py` every save already does this.
+            restart_button = gr.Button(
+                "⟳ Restart webui", variant="secondary", size="sm", scale=0, min_width=150, visible=not demo.dev_mode
+            )
 
         tabs = []  # (tab, feature), wired once the console column exists
         with gr.Row():
@@ -78,19 +84,16 @@ def build_ui():
                                 gr.Markdown(feature.description)
                             inputs = feature.panel(opts)
                             names = list(inputs)
-                            # Start is the only button a form needs: stopping
-                            # belongs next to the log that shows what is running.
-                            button = gr.Button(f"Start {feature.label}", variant="primary")
-                            pending_starts.append((button, feature, names, [inputs[n] for n in names]))
+                            # Every tab starts and stops its own job.
+                            with gr.Row():
+                                button = gr.Button(f"Start {feature.label}", variant="primary")
+                                stop_button = gr.Button(f"Stop {feature.label}", variant="stop")
+                            pending_starts.append((button, stop_button, feature, names, [inputs[n] for n in names]))
                             for field in flatten(feature.fields):
                                 if field.kind in ("choice", "multichoice"):
                                     choice_fields.append(field)
                                     choice_components.append(inputs[field.name])
 
-                with gr.Row():
-                    rescan_button = gr.Button("↻ Rescan", variant="secondary")
-                    # Under `gradio webui/app.py` every save already does this.
-                    restart_button = gr.Button("⟳ Restart webui", variant="secondary", visible=not demo.dev_mode)
                 gr.Markdown(f"<sub>root: `{ROOT}`</sub>")
 
             with gr.Column(scale=6) as console_column:
@@ -99,7 +102,6 @@ def build_ui():
                         with gr.Tab(SLOT_LABELS.get(slot, slot)):
                             with gr.Row():
                                 status = gr.Markdown("⚪ **idle**")
-                                stop_button = gr.Button("Stop", variant="stop", size="sm", scale=0, min_width=90)
                                 clear_button = gr.Button("Clear console", size="sm", scale=0, min_width=140)
                             log = gr.Textbox(
                                 label="log",
@@ -112,12 +114,13 @@ def build_ui():
                                 elem_classes="console",
                             )
                             consoles[slot] = [status, log, gr.State(())]
-                            stop_button.click(make_stop(slot), outputs=consoles[slot])
                             clear_button.click(make_clear(slot), outputs=consoles[slot])
 
-        for button, feature, names, components in pending_starts:
+        labels = {feature.name: feature.label for feature in features}
+        for button, stop_button, feature, names, components in pending_starts:
             console = consoles[feature.slot]
             button.click(make_start(feature, names), inputs=components, outputs=console)
+            stop_button.click(make_stop(feature, labels), outputs=console)
         rescan_button.click(make_rescan(choice_fields), outputs=choice_components)
         # The server now serves the rebuilt page; this one is stale, so fetch it.
         restart_button.click(make_restart(demo)).success(fn=None, js="() => { location.reload(); }")

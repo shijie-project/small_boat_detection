@@ -173,11 +173,24 @@ def make_start(feature, names):
     return start
 
 
-def make_stop(slot):
+def make_stop(feature, labels=None):
+    """Click handler of a tab's Stop: stops the job that tab started.
+
+    Several tabs share a slot (train, test and inference all queue for the
+    GPUs), so a job another tab started is left running -- Stop on *Test*
+    must not kill a training run -- and the toast says where to stop it.
+    """
+
     def stop():
-        ok, message = job(slot).stop()
+        state = job(feature.slot).status()
+        owner = state["meta"].get("feature")
+        if state["running"] and owner and owner != feature.name:
+            name = (labels or {}).get(owner, owner)
+            gr.Warning(f"{name} is running, not {feature.label} -- stop it from the {name} tab")
+            return paint(feature.slot)
+        ok, message = job(feature.slot).stop()
         (gr.Info if ok else gr.Warning)(message)
-        return paint(slot)
+        return paint(feature.slot)
 
     return stop
 

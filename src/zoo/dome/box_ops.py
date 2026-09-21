@@ -66,6 +66,65 @@ def generalized_box_iou(boxes1, boxes2):
     return iou - (area - union) / area
 
 
+def paired_box_iou(boxes1: Tensor, boxes2: Tensor):
+    """IoU of ``boxes1[i]`` with ``boxes2[i]``.
+
+    Same values as ``torch.diag(box_iou(boxes1, boxes2)[0])`` (and the diagonal of
+    the union), without building the N x N matrices the diagonal is taken from.
+    """
+    area1 = box_area(boxes1)
+    area2 = box_area(boxes2)
+
+    lt = torch.max(boxes1[:, :2], boxes2[:, :2])
+    rb = torch.min(boxes1[:, 2:], boxes2[:, 2:])
+
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[:, 0] * wh[:, 1]
+
+    union = area1 + area2 - inter
+
+    iou = inter / union
+    return iou, union
+
+
+def paired_generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
+    """``torch.diag(generalized_box_iou(boxes1, boxes2))`` in O(N) memory."""
+    iou, union = paired_box_iou(boxes1, boxes2)
+
+    lt = torch.min(boxes1[:, :2], boxes2[:, :2])
+    rb = torch.max(boxes1[:, 2:], boxes2[:, 2:])
+
+    wh = (rb - lt).clamp(min=0)
+    area = wh[:, 0] * wh[:, 1]
+
+    return iou - (area - union) / area
+
+
+def batched_generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
+    """Pairwise GIoU per batch entry: ``[N, Q, 4] x [N, T, 4] -> [N, Q, T]``.
+
+    Element for element the same arithmetic as :func:`generalized_box_iou`; the
+    degenerate-box check is left to the caller so it can be batched with other
+    device-to-host reads.
+    """
+    area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+    area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+
+    lt = torch.max(boxes1[:, :, None, :2], boxes2[:, None, :, :2])
+    rb = torch.min(boxes1[:, :, None, 2:], boxes2[:, None, :, 2:])
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[..., 0] * wh[..., 1]
+    union = area1[:, :, None] + area2[:, None, :] - inter
+    iou = inter / union
+
+    lt = torch.min(boxes1[:, :, None, :2], boxes2[:, None, :, :2])
+    rb = torch.max(boxes1[:, :, None, 2:], boxes2[:, None, :, 2:])
+    wh = (rb - lt).clamp(min=0)
+    area = wh[..., 0] * wh[..., 1]
+
+    return iou - (area - union) / area
+
+
 def masks_to_boxes(masks):
     """Compute the bounding boxes around the provided masks
 

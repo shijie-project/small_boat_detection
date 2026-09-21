@@ -14,6 +14,7 @@ from math import ceil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 from src.zoo.dome.get_roi_features import (
     TransformerEncoder,
@@ -22,7 +23,7 @@ from src.zoo.dome.get_roi_features import (
 )
 
 from ...core import register
-from .defe import GaussHeatmapGenerator, LiteDeFE
+from .defe import LiteDeFE, gauss_heatmaps
 from .utils import get_activation
 
 
@@ -244,6 +245,38 @@ class RepNCSPELAN4(nn.Module):
         return self.cv4(torch.cat(y, 1))
 
 
+def checkpoint_bn_safe(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """``module(x)`` without keeping its activations for backward; they are
+    recomputed during backward instead (less memory, one more forward).
+
+    The recomputation runs the BatchNorm layers in training mode again, which
+    would fold the same batch into their running statistics twice; their
+    buffers are restored afterwards so the result matches the plain call.
+    """
+    calls = [0]
+
+    def run(inp):
+        calls[0] += 1
+        if calls[0] == 1:
+            return module(inp)
+        buffers = [
+            b
+            for m in module.modules()
+            if isinstance(m, nn.modules.batchnorm._BatchNorm)
+            for b in (m.running_mean, m.running_var, m.num_batches_tracked)
+            if b is not None
+        ]
+        saved = [b.clone() for b in buffers]
+        try:
+            return module(inp)
+        finally:  # also when checkpoint's early stop aborts the recomputation
+            with torch.no_grad():
+                for b, s in zip(buffers, saved):
+                    b.copy_(s)
+
+    return torch.utils.checkpoint.checkpoint(run, x, use_reentrant=False)
+
+
 class CSPLayer(nn.Module):
     def __init__(
         self,
@@ -302,8 +335,13 @@ class HybridEncoder(nn.Module):
         defe_type="default",
         use_mwas=False,
         mwas_window_size=20,
+        grad_checkpoint=False,
     ):
         super().__init__()
+        # Recompute the FPN / PAN blocks in backward instead of storing their
+        # activations: the stride-4 block alone holds ~30% of all activation
+        # memory. Costs one extra forward of those blocks per step.
+        self.grad_checkpoint = grad_checkpoint
         self.num_feature_levels = num_feature_levels
         self.hidden_dim = hidden_dim
         self.use_encoder_idx = use_encoder_idx
@@ -322,6 +360,9 @@ class HybridEncoder(nn.Module):
         self.defe_type = defe_type
         self.use_mwas = use_mwas
         self.mwas_window_size = mwas_window_size
+        # device copies of the fixed sin-cos position embeddings, per shape; kept
+        # out of the state dict so checkpoints are unaffected
+        self._pos_embed_cache = {}
 
         # channel projection
         self.input_proj = nn.ModuleList()
@@ -468,6 +509,21 @@ class HybridEncoder(nn.Module):
 
         return torch.concat([out_w.sin(), out_w.cos(), out_h.sin(), out_h.cos()], dim=1)[None, :, :]
 
+    def _run_block(self, block, x):
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            return checkpoint_bn_safe(block, x)
+        return block(x)
+
+    def _cached_pos_embed(self, w, h, embed_dim, temperature, device):
+        """``build_2d_sincos_position_embedding(w, h, ...).to(device)``, built on the
+        CPU and copied to the device once per shape instead of on every forward."""
+        key = (int(w), int(h), embed_dim, float(temperature), str(device))
+        pos = self._pos_embed_cache.get(key)
+        if pos is None:
+            pos = self.build_2d_sincos_position_embedding(w, h, embed_dim, temperature).to(device)
+            self._pos_embed_cache[key] = pos
+        return pos
+
     def get_valid_ratio(self, mask):
         _, H, W = mask.shape
         valid_H = torch.sum(~mask[:, :, 0], 1)
@@ -501,26 +557,27 @@ class HybridEncoder(nn.Module):
             defe_feature_filtered: 调整后的二值掩码 [B, 1, H, W]
         """
         B = defe_feature.shape[0]
-        final_mask = torch.zeros_like(defe_feature, dtype=torch.bool)
 
-        # 对每个样本独立处理
-        for b in range(B):
-            # 提取单样本置信图 [1, H, W]
-            single_feat = defe_feature[b : b + 1]
-            current_thresh = init_thresh
-            found = False
+        # The thresholds the per-sample search tries, highest first.
+        thresholds = []
+        current_thresh = init_thresh
+        while current_thresh >= 0:
+            thresholds.append(current_thresh)
+            current_thresh = round(current_thresh - step, 2)
 
-            # 阈值搜索循环
-            while current_thresh >= 0:
-                mask = single_feat > current_thresh
-                if mask.any():
-                    final_mask[b : b + 1] = mask
-                    found = True
-                    break
-                current_thresh = round(current_thresh - step, 2)
+        # Evaluate every threshold for the whole batch at once and give each sample
+        # the mask of the first one that leaves something (the loop used to call
+        # `mask.any()` -- a host sync -- per sample per threshold).
+        masks = torch.stack([defe_feature > t for t in thresholds])  # [T, B, 1, H, W]
+        hit = masks.flatten(2).any(-1)  # [T, B]
+        first = hit.int().argmax(0)  # first threshold with a hit (0 if none)
+        final_mask = masks[first, torch.arange(B, device=defe_feature.device)]
+        found = hit.any(0)
 
-            # 未找到有效区域则随机选择一个点加强
-            if not found:
+        # 未找到有效区域则随机选择一个点加强
+        if not bool(found.all()):
+            for b in torch.nonzero(~found).flatten().tolist():
+                single_feat = defe_feature[b : b + 1]
                 final_mask[b : b + 1] = torch.zeros_like(single_feat, dtype=torch.bool)
                 final_mask[b : b + 1][
                     :,
@@ -568,10 +625,9 @@ class HybridEncoder(nn.Module):
                     )
                 ).float()
                 glob_pos_embed = (
-                    self.build_2d_sincos_position_embedding(W, H, embed_dim=self.hidden_dim)
+                    self._cached_pos_embed(W, H, self.hidden_dim, 10000.0, proj_feats[1].device)
                     .permute(0, 2, 1)
                     .view(-1, H, W)
-                    .to(proj_feats[1].device)
                 )
                 enhanced_memory, defe_window_mask = self.mwas_processor(
                     proj_feats[1],
@@ -614,7 +670,7 @@ class HybridEncoder(nn.Module):
             out["defe"]["gt_density_map"] = []
             if targets is not None:
                 B, C, H, W = img_inputs.shape
-                heatmap_generator = GaussHeatmapGenerator(img_size=(H, W))
+                boxes_list = []
                 for b in range(B):
                     boxes = targets[b]["boxes"]
                     # conver xyxy to center_xywh
@@ -628,9 +684,9 @@ class HybridEncoder(nn.Module):
                         cxcy = (x1y1 + x2y2) / 2
                         wh = x2y2 - x1y1
                         boxes = torch.cat([cxcy, wh], dim=1)
-                    heatmap = heatmap_generator(boxes)
-                    out["defe"]["gt_density_map"].append(heatmap)
-                out["defe"]["gt_density_map"] = torch.stack(out["defe"]["gt_density_map"]).to(img_inputs.device)
+                    boxes_list.append(boxes.to(img_inputs.device))
+                heatmap = gauss_heatmaps(boxes_list, (H, W))
+                out["defe"]["gt_density_map"] = heatmap
                 if SAVE_INTERMEDIATE_VISUALIZE_RESULT:
                     from tools.visualize_src_flatten import visualize_src_flatten
 
@@ -722,11 +778,15 @@ class HybridEncoder(nn.Module):
                     # flatten [B, C, H, W] to [B, HxW, C]
                     src_flatten = proj_feats[enc_ind].flatten(2).permute(0, 2, 1)
                     if self.training or self.eval_spatial_size is None:
-                        pos_embed = self.build_2d_sincos_position_embedding(
-                            w, h, self.hidden_dim, self.pe_temperature
-                        ).to(src_flatten.device)
+                        pos_embed = self._cached_pos_embed(
+                            w, h, self.hidden_dim, self.pe_temperature, src_flatten.device
+                        )
                     else:
-                        pos_embed = self.pos_embeds[i].to(src_flatten.device)
+                        pos_embed = self.pos_embeds[i]
+                        if pos_embed.device != src_flatten.device:
+                            # self.pos_embeds is a plain list, so .to(device) never
+                            # moved it: keep the device copy instead of re-uploading
+                            pos_embed = self.pos_embeds[i] = pos_embed.to(src_flatten.device)
                     memory: torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
                     proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()
 
@@ -744,8 +804,8 @@ class HybridEncoder(nn.Module):
                     mode="bilinear",
                     align_corners=True,
                 )
-                inner_out = self.fpn_blocks[len(self.in_channels) - 1 - idx](
-                    torch.concat([upsample_feat, feat_low], dim=1)
+                inner_out = self._run_block(
+                    self.fpn_blocks[len(self.in_channels) - 1 - idx], torch.concat([upsample_feat, feat_low], dim=1)
                 )
                 inner_outs.insert(0, inner_out)
 
@@ -754,7 +814,7 @@ class HybridEncoder(nn.Module):
                 feat_low = outs[-1]
                 feat_height = inner_outs[idx + 1]
                 downsample_feat = self.downsample_convs[idx](feat_low)
-                pan_out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1))
+                pan_out = self._run_block(self.pan_blocks[idx], torch.concat([downsample_feat, feat_height], dim=1))
                 outs.append(pan_out)
         else:
             outs = proj_feats

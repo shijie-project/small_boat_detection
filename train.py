@@ -6,6 +6,13 @@ Copyright(c) 2024 The D-FINE Authors. All Rights Reserved.
 import os
 import sys
 
+
+# Must be set before CUDA initialises. Growable segments stop the allocator from
+# fragmenting under this model's per-step changing query counts, i.e. less
+# memory reserved-but-unused (Linux only; Windows ignores it with a warning).
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 
 
@@ -37,6 +44,12 @@ if debug:
 def main(args) -> None:
     """main"""
     dist_utils.setup_distributed(args.print_rank, args.print_method, seed=args.seed)
+
+    # TF32 tensor cores for fp32 matmuls, as convolutions already use by default.
+    # (cudnn.benchmark is deliberately left off: its autotuning trials allocate
+    # huge workspaces -- peak memory nearly doubled -- and cost ~10 s up front.)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     assert not all([args.tuning, args.resume]), "Only support from_scratch or resume or tuning at one time"
 
@@ -80,7 +93,14 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--tuning", type=str, help="tuning from checkpoint")
     parser.add_argument("-d", "--device", type=str, help="device")
     parser.add_argument("--seed", type=int, help="exp reproducibility")
-    parser.add_argument("--use-amp", action="store_true", help="auto mixed precision training")
+    # default None, not False: a False default always overrode the config, so
+    # `use_amp: True` in the YAML (configs/dome/include/optimizer.yml) never applied
+    parser.add_argument(
+        "--use-amp",
+        action="store_true",
+        default=None,
+        help="auto mixed precision training (default: config's use_amp)",
+    )
     parser.add_argument("--output-dir", type=str, help="output directoy")
     parser.add_argument("--summary-dir", type=str, help="tensorboard summry")
     parser.add_argument("--test-only", action="store_true", default=False)

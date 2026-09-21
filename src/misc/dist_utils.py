@@ -162,6 +162,9 @@ def de_model(model):
 def warp_loader(loader, shuffle=False):
     if is_dist_available_and_initialized():
         sampler = DistributedSampler(loader.dataset, shuffle=shuffle)
+        extra = {}
+        if loader.num_workers > 0:
+            extra = dict(persistent_workers=loader.persistent_workers, prefetch_factor=loader.prefetch_factor)
         loader = DataLoader(
             loader.dataset,
             loader.batch_size,
@@ -170,6 +173,7 @@ def warp_loader(loader, shuffle=False):
             collate_fn=loader.collate_fn,
             pin_memory=loader.pin_memory,
             num_workers=loader.num_workers,
+            **extra,
         )
     return loader
 

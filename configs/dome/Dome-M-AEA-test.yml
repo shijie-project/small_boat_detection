@@ -59,7 +59,7 @@ train_dataloader:
 
 
 val_dataloader:
-  num_workers: 0
+  num_workers: 4
   total_batch_size: 16
   dataset:
     transforms:

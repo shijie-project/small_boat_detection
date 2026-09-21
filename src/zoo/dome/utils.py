@@ -10,6 +10,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def host_to_device(data, device, dtype=None) -> torch.Tensor:
+    """``torch.tensor(data).to(device)`` without stalling the host.
+
+    A plain host-to-GPU copy synchronises the stream; staging through pinned
+    memory lets it be queued like any other kernel.
+    """
+    t = torch.as_tensor(data, dtype=dtype)
+    if torch.device(device).type != "cuda" or t.device.type != "cpu":
+        return t.to(device)
+    return t.pin_memory().to(device, non_blocking=True)
+
+
 def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     x = x.clip(min=0.0, max=1.0)
     return torch.log(x.clip(min=eps) / (1 - x).clip(min=eps))

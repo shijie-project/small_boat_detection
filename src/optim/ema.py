@@ -64,14 +64,37 @@ class ModelEMA:
         with torch.no_grad():
             self.updates += 1
             d = self.decay_fn(self.updates)
-            msd = dist_utils.de_parallel(model).state_dict()
+            for ema_vals, model_vals in self._float_groups(dist_utils.de_parallel(model)):
+                # Same arithmetic as `v *= d; v += (1 - d) * m` per tensor, as three
+                # multi-tensor kernels instead of ~3 launches per state-dict entry.
+                scaled = torch._foreach_mul(model_vals, 1 - d)
+                torch._foreach_mul_(ema_vals, d)
+                torch._foreach_add_(ema_vals, scaled)
+
+    def _float_groups(self, model: nn.Module):
+        """Floating-point (ema, model) state tensors, grouped by device and dtype
+        for the foreach kernels, cached per model.
+
+        The tensors alias the modules' own storage (state_dict() entries are
+        detached views), so they stay valid while the optimizer updates in place;
+        the cache is dropped whenever the EMA module is moved or reloaded.
+        """
+        cache = getattr(self, "_pairs", None)
+        if cache is None or cache[0] is not model:
+            msd = model.state_dict()
+            groups = {}
             for k, v in self.module.state_dict().items():
                 if v.dtype.is_floating_point:
-                    v *= d
-                    v += (1 - d) * msd[k].detach()
+                    m = msd[k].detach()
+                    ema_vals, model_vals = groups.setdefault((v.device, v.dtype, m.device, m.dtype), ([], []))
+                    ema_vals.append(v)
+                    model_vals.append(m)
+            cache = self._pairs = (model, list(groups.values()))
+        return cache[1]
 
     def to(self, *args, **kwargs):
         self.module = self.module.to(*args, **kwargs)
+        self._pairs = None
         return self
 
     def state_dict(self):
@@ -79,6 +102,7 @@ class ModelEMA:
 
     def load_state_dict(self, state, strict=True):
         self.module.load_state_dict(state["module"], strict=strict)
+        self._pairs = None
         if "updates" in state:
             self.updates = state["updates"]
 

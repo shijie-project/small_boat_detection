@@ -88,25 +88,95 @@ class LiteDeFE(nn.Module):
 
         self.regression_head = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(256, 1), nn.Sigmoid())
 
+    def _density_head(self, x):
+        # Same result as self.density_head(x) with the 1x1 conv moved in front of
+        # the upsample: both are linear and bilinear weights sum to 1, so they
+        # commute, and the x4 upsample then runs on 1 channel instead of 128
+        # (the 128-channel map at 1/2 input resolution was the largest tensor
+        # this module kept for backward).
+        conv3x3, upsample, conv1x1, sigmoid = self.density_head
+        return sigmoid(upsample(conv1x1(conv3x3(x))))
+
     def forward(self, features):
         x = self.conv1(features)
 
         x = self.defe(x)
 
         density = F.interpolate(
-            self.density_head(x),  # 用x生成密度图
+            self._density_head(x),  # 用x生成密度图
             scale_factor=2,
             mode="bilinear",
             align_corners=False,
         )
 
-        # 对density进行0-1归一化
-        if density.max() > 0:
-            density = density / density.max()
+        # 对density进行0-1归一化 (without reading the max back to the host)
+        peak = density.max()
+        density = density / torch.where(peak > 0, peak, torch.ones_like(peak))
 
         reg_value = self.regression_head(x)
 
         return density, reg_value
+
+
+def gauss_heatmaps(boxes_list, img_size, sigma_ratio=1.2):
+    """Batched, on-device equivalent of ``GaussHeatmapGenerator`` for a list of images.
+
+    Every box contributes a normalised Gaussian kernel that is separable, so an
+    image's heatmap is ``Gy^T @ Gx`` with one row per box in Gy [N, H] and Gx
+    [N, W]; the per-box Python loop (four host syncs per box when the boxes
+    live on the GPU) and the CPU-side accumulation become a few kernels.
+    Pixel centres, kernel radii, clipping and normalisation follow
+    ``GaussHeatmapGenerator`` exactly; the arithmetic runs in float64.
+
+    Returns [B, 1, H, W] float32 on the boxes' device.
+    """
+    H, W = img_size
+    device = boxes_list[0].device
+    counts = [len(b) for b in boxes_list]
+    heatmaps = torch.zeros((len(boxes_list), 1, H, W), dtype=torch.float32, device=device)
+    if sum(counts) == 0:
+        return heatmaps
+
+    boxes = torch.cat([b.as_subclass(torch.Tensor) for b in boxes_list])
+
+    def profile(center, size, extent):
+        # int(center * extent), max(int(size * extent), 1): multiply in the boxes'
+        # own dtype and truncate, as the scalar code did
+        c = torch.trunc(center * extent).double()
+        s = torch.trunc(size * extent).double().clamp(min=1)
+        sigma = (s * sigma_ratio).clamp(min=1.0).clamp(min=0.1)
+        k = torch.trunc(6 * sigma) + 1
+        k = torch.where(k % 2 == 0, k + 1, k)
+        radius = torch.div(k, 2, rounding_mode="floor")
+        return c, sigma, radius
+
+    cx, sx, rx = profile(boxes[:, 0], boxes[:, 2], W)
+    cy, sy, ry = profile(boxes[:, 1], boxes[:, 3], H)
+
+    # the kernel's own normaliser: sum over offsets -r..r, by symmetry 1 + 2 * sum(1..r)
+    max_radius = int(torch.maximum(rx.max(), ry.max()).item())
+    offsets = torch.arange(1, max_radius + 1, dtype=torch.float64, device=device)
+
+    def normaliser(sigma, radius):
+        g = torch.exp(-(offsets**2) / (2 * sigma[:, None] ** 2)) * (offsets <= radius[:, None])
+        return 1 + 2 * g.sum(1)
+
+    def axis(c, sigma, radius, extent):
+        d = torch.arange(extent, dtype=torch.float64, device=device)[None, :] - c[:, None]
+        g = torch.exp(-(d**2) / (2 * sigma[:, None] ** 2)) * (d.abs() <= radius[:, None])
+        return g / normaliser(sigma, radius)[:, None]
+
+    gx = axis(cx, sx, rx, W)  # [N, W]
+    gy = axis(cy, sy, ry, H)  # [N, H]
+
+    start = 0
+    for b, n in enumerate(counts):
+        if n:
+            hm = gy[start : start + n].T @ gx[start : start + n]
+            peak = hm.max()
+            heatmaps[b, 0] = hm / torch.where(peak > 0, peak, torch.ones_like(peak))
+        start += n
+    return heatmaps
 
 
 class GaussHeatmapGenerator:

@@ -5,6 +5,7 @@ Copyright(c) 2024 The D-FINE Authors. All Rights Reserved.
 
 import importlib.metadata
 
+import torch
 from torch import Tensor
 
 
@@ -33,6 +34,43 @@ elif importlib.metadata.version("torchvision") >= "0.17":
 
 else:
     raise RuntimeError("Please make sure torchvision version >= 0.15.2")
+
+
+class SharedEpoch:
+    """An epoch counter that DataLoader worker processes see change.
+
+    Persistent workers keep the dataset / collate_fn copy they started with, so a
+    plain attribute set in the main process afterwards never reaches them; a
+    shared-memory tensor does, under both fork and spawn.
+    """
+
+    def __init__(self, epoch: int = -1) -> None:
+        self._value = torch.full((1,), epoch, dtype=torch.int64).share_memory_()
+
+    def set(self, epoch: int) -> None:
+        self._value[0] = epoch
+
+    def get(self) -> int:
+        return int(self._value[0])
+
+
+class EpochMixin:
+    """``set_epoch`` / ``epoch`` backed by a :class:`SharedEpoch` once one exists."""
+
+    def init_shared_epoch(self) -> None:
+        if "_shared_epoch" not in self.__dict__:
+            self._shared_epoch = SharedEpoch(self._epoch if hasattr(self, "_epoch") else -1)
+
+    def set_epoch(self, epoch) -> None:
+        self._epoch = epoch
+        if "_shared_epoch" in self.__dict__:
+            self._shared_epoch.set(epoch)
+
+    @property
+    def epoch(self):
+        if "_shared_epoch" in self.__dict__:
+            return self._shared_epoch.get()
+        return self._epoch if hasattr(self, "_epoch") else -1
 
 
 def convert_to_tv_tensor(tensor: Tensor, key: str, box_format="xyxy", spatial_size=None) -> Tensor:

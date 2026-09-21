@@ -10,6 +10,9 @@ DomeTransformer:
 
 HybridEncoder:
   mwas_window_size: 16
+  # True: recompute the FPN/PAN blocks during backward instead of storing their
+  # activations -- ~30% less training memory for ~15% more time per step.
+  grad_checkpoint: False
 
 optimizer:
   type: AdamW
@@ -59,7 +62,7 @@ train_dataloader:
 
 
 val_dataloader:
-  num_workers: 0
+  num_workers: 4
   total_batch_size: 8
   dataset:
     transforms:

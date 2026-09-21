@@ -12,12 +12,13 @@ import math
 import os
 from collections import OrderedDict
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 
-from src.zoo.dome.dynamic_nms import dynamic_nms_fast
+from src.zoo.dome.dynamic_nms import dynamic_nms_indices
 from tools.visualize_image_annotation import visualize_detection
 
 from ...core import register
@@ -27,6 +28,7 @@ from .utils import (
     bias_init_with_prob,
     deformable_attention_core_func_v2,
     get_activation,
+    host_to_device,
     inverse_sigmoid,
 )
 
@@ -226,7 +228,9 @@ class TransformerDecoderLayer(nn.Module):
         # self attention
         q = k = self.with_pos_embed(target, query_pos_embed)
 
-        target2, _ = self.self_attn(q, k, value=target, attn_mask=attn_mask)
+        # need_weights=False: same output, but no [B * heads, Q, Q] probability
+        # tensor -- the fused attention kernel is used instead
+        target2, _ = self.self_attn(q, k, value=target, attn_mask=attn_mask, need_weights=False)
         target = target + self.dropout1(target2)
         target = self.norm1(target)
 
@@ -351,7 +355,10 @@ class TransformerDecoder(nn.Module):
             value = value * memory_mask.to(value.dtype).unsqueeze(-1)
         value = value.reshape(value.shape[0], value.shape[1], self.num_head, -1)
         split_shape = [h * w for h, w in memory_spatial_shapes]
-        return value.permute(0, 2, 3, 1).split(split_shape, dim=-1)
+        # Made contiguous once here: the per-level views are otherwise strided, so
+        # every decoder layer's reshape inside the attention core copied the whole
+        # memory again (and kept that copy alive for backward).
+        return [v.contiguous() for v in value.permute(0, 2, 3, 1).split(split_shape, dim=-1)]
 
     def convert_to_deploy(self):
         self.project = weighting_function(self.reg_max, self.up, self.reg_scale, deploy=True)
@@ -560,6 +567,7 @@ class DomeTransformer(nn.Module):
         self.reg_max = reg_max
         self.min_num_select = min_num_select
         self.max_num_select = max_num_select
+        self._anchor_cache = {}  # not part of the state dict
 
         assert query_select_method in ("default", "one2many", "agnostic"), ""
         assert cross_attn_method in ("default", "discrete"), ""
@@ -780,6 +788,15 @@ class DomeTransformer(nn.Module):
 
         return anchors, valid_mask
 
+    def _cached_anchors(self, spatial_shapes, device):
+        """Anchors depend only on the feature shapes: build them once per shape
+        instead of on the CPU plus a host-to-device copy on every forward."""
+        key = (tuple(tuple(int(v) for v in s) for s in spatial_shapes), str(device))
+        cached = self._anchor_cache.get(key)
+        if cached is None:
+            cached = self._anchor_cache[key] = self._generate_anchors(spatial_shapes, device=device)
+        return cached
+
     def _get_decoder_input(
         self,
         memory: torch.Tensor,
@@ -791,21 +808,36 @@ class DomeTransformer(nn.Module):
         W=800,
     ):
         # prepare input for decoder
-        anchors, valid_mask = self._generate_anchors(spatial_shapes, device=memory.device)
+        anchors, valid_mask = self._cached_anchors(spatial_shapes, memory.device)
 
         if memory.shape[0] > 1:
             anchors = anchors.repeat(memory.shape[0], 1, 1)
         memory = valid_mask.to(memory.dtype) * memory
 
-        output_memory: torch.Tensor = self.enc_output(memory)
-        enc_outputs_logits: torch.Tensor = self.enc_score_head(output_memory)
+        # Every token (~87k per 1024px image) is scored, but only the top-k rows
+        # are used afterwards, so only they need autograd. Score everything
+        # without building a graph, then re-run the (row-wise) head on the
+        # selected rows with gradients. The values are taken from the full pass,
+        # so outputs are unchanged; gradients are the same; and the three
+        # full-size head activations are no longer kept for backward.
+        with torch.no_grad():
+            output_memory: torch.Tensor = self.enc_output(memory)
+            enc_outputs_logits: torch.Tensor = self.enc_score_head(output_memory)
 
         enc_topk_bboxes_list, enc_topk_logits_list = [], []
 
         # Select top-k features, logits, and anchors
-        enc_topk_memory, enc_topk_logits, enc_topk_anchors = self._select_topk(
-            output_memory, enc_outputs_logits, anchors, self.max_num_select
+        enc_topk_memory, enc_topk_logits, enc_topk_anchors, topk_ind = self._select_topk(
+            output_memory, enc_outputs_logits, anchors, self.max_num_select, return_index=True
         )
+        del output_memory, enc_outputs_logits
+        if torch.is_grad_enabled():
+            rows = memory.gather(dim=1, index=topk_ind.unsqueeze(-1).repeat(1, 1, memory.shape[-1]))
+            rows_memory = self.enc_output(rows)
+            rows_logits = self.enc_score_head(rows_memory)
+            # value of the full pass, gradient of the recomputed rows
+            enc_topk_memory = enc_topk_memory + (rows_memory - rows_memory.detach())
+            enc_topk_logits = enc_topk_logits + (rows_logits - rows_logits.detach())
 
         B = enc_topk_anchors.size(0)
         min_num, max_num = self.min_num_select, self.max_num_select
@@ -819,104 +851,29 @@ class DomeTransformer(nn.Module):
         logits_second = enc_topk_logits[:, min_num:max_num]
         anchors_second = enc_topk_anchors[:, min_num:max_num, :]
 
-        # Calculate window indices for remaining anchors
-        if defe_window_mask is not None:
-            n_x, n_y = defe_window_mask.shape[1], defe_window_mask.shape[2]
-            cx, cy = (
-                F.sigmoid(anchors_second[..., 0]),
-                F.sigmoid(anchors_second[..., 1]),
-            )
-            window_col = (cx * n_x).long().clamp(0, n_x - 1)
-            window_row = (cy * n_y).long().clamp(0, n_y - 1)
-
-            selected_mask = defe_window_mask[
-                torch.arange(B, device=enc_topk_anchors.device).view(-1, 1),
-                window_row,
-                window_col,
-            ]
+        if memory_second.shape[1] == 0:
+            # min_num_select >= max_num_select: there are no density-selected
+            # candidates, and the NMS only ever filters those (the first min_num
+            # are always kept), so every image keeps exactly its first min_num
+            # queries. Same result as the per-image loop, without the loop.
+            bbox_unact = self.enc_bbox_head(memory_first) + anchors_first
+            batch_queries_num = [memory_first.shape[1]] * B
+            # the padded buffers of the general path are float32; cast the same way
+            padded_memory = memory_first.float()
+            padded_logits = logits_first.float()
+            padded_bbox_unact = bbox_unact.float()
         else:
-            selected_mask = torch.ones_like(anchors_second[..., 0], dtype=torch.bool)
-
-        # Process each batch and combine valid anchors
-        combined_memory, combined_logits, combined_anchors, combined_bbox_unact = (
-            [],
-            [],
-            [],
-            [],
-        )
-        total_per_batch = []
-
-        # Do class-based NMS anchor selection
-        for b in range(B):
-            mask_b = selected_mask[b]
-            mem_second = memory_second[b][mask_b]
-            log_second = logits_second[b][mask_b]
-            anc_second = anchors_second[b][mask_b]
-
-            mem_combined = torch.cat([memory_first[b], mem_second], dim=0)
-            log_combined = torch.cat([logits_first[b], log_second], dim=0)
-            anc_combined = torch.cat([anchors_first[b], anc_second], dim=0)
-
-            bbox_combined_unact = self.enc_bbox_head(mem_combined) + anc_combined
-            bbox_combined = F.sigmoid(bbox_combined_unact)
-
-            # 执行基于类别的NMS
-            if log_combined.size(0) > 0:
-                # 转换anchor到边界框格式[x1, y1, x2, y2]
-                cx = bbox_combined[:, 0]
-                cy = bbox_combined[:, 1]
-                w = bbox_combined[:, 2]
-                h = bbox_combined[:, 3]
-                x1 = cx - w / 2
-                y1 = cy - h / 2
-                x2 = cx + w / 2
-                y2 = cy + h / 2
-                boxes = torch.stack([x1, y1, x2, y2], dim=1)
-
-                # 在合并候选框后计算中心坐标
-                cf_h, cf_w = defe_feature.shape[2:]
-                window_row = (cx * (cf_w - 1)).long().clamp(0, cf_w - 1)
-                window_col = (cy * (cf_h - 1)).long().clamp(0, cf_h - 1)
-                density_values = defe_feature[b, :, window_row, window_col].squeeze(0).detach()  # 形状 (num_queries,)
-
-                iou_thresholds = 0.4 + 0.5 * density_values
-
-                # 获取每个anchor的类别分数和类别ID
-                scores, class_ids = log_combined.max(dim=1)
-
-                # 应用NMS
-                keep_idx = dynamic_nms_fast(boxes, scores, class_ids, iou_thresholds)
-
-                # 前min_num个anchor不进行NMS
-                final_keep_idx = torch.arange(min_num).to(keep_idx.device)
-                final_keep_idx = torch.cat([final_keep_idx, keep_idx[keep_idx >= min_num]])
-
-                mem_combined = mem_combined[final_keep_idx]
-                log_combined = log_combined[final_keep_idx]
-                anc_combined = anc_combined[final_keep_idx]
-                bbox_combined_unact = bbox_combined_unact[final_keep_idx]
-
-            combined_memory.append(mem_combined)
-            combined_logits.append(log_combined)
-            combined_anchors.append(anc_combined)
-            combined_bbox_unact.append(bbox_combined_unact)
-            total_per_batch.append(mem_combined.size(0))
-
-        # Pad to max number of anchors across batches
-        max_total = max(total_per_batch)
-        padded_memory = torch.zeros((B, max_total, memory_first.size(-1)), device=enc_topk_memory.device)
-        padded_logits = torch.zeros((B, max_total, num_classes), device=enc_topk_logits.device)
-        # padded_anchors = torch.zeros((B, max_total, 4), device=enc_topk_anchors.device) # Not strictly needed if unact is used
-        padded_bbox_unact = torch.zeros((B, max_total, 4), device=enc_topk_anchors.device)
-        batch_queries_num = []
-
-        for b in range(B):
-            current_len = total_per_batch[b]
-            padded_memory[b, :current_len] = combined_memory[b]
-            padded_logits[b, :current_len] = combined_logits[b]
-            # padded_anchors[b, :current_len] = combined_anchors[b]
-            padded_bbox_unact[b, :current_len] = combined_bbox_unact[b]
-            batch_queries_num.append(current_len)
+            padded_memory, padded_logits, padded_bbox_unact, batch_queries_num = self._select_dense_queries(
+                memory_first,
+                logits_first,
+                anchors_first,
+                memory_second,
+                logits_second,
+                anchors_second,
+                defe_window_mask,
+                defe_feature,
+                num_classes,
+            )
 
         # 我们直接使用已经 Pad 好的 padded_bbox_unact 和 padded_logits 即可。
         enc_topk_bbox_unact = padded_bbox_unact
@@ -941,12 +898,130 @@ class DomeTransformer(nn.Module):
             batch_queries_num,
         )
 
+    def _select_dense_queries(
+        self,
+        memory_first,
+        logits_first,
+        anchors_first,
+        memory_second,
+        logits_second,
+        anchors_second,
+        defe_window_mask,
+        defe_feature,
+        num_classes,
+    ):
+        """Add the density-selected candidates to the first ``min_num`` queries of
+        each image (window mask, then density-aware NMS) and pad to a batch."""
+        B = memory_first.size(0)
+        min_num = self.min_num_select
+        device = memory_first.device
+
+        # Calculate window indices for remaining anchors
+        if defe_window_mask is not None:
+            n_x, n_y = defe_window_mask.shape[1], defe_window_mask.shape[2]
+            cx, cy = (
+                F.sigmoid(anchors_second[..., 0]),
+                F.sigmoid(anchors_second[..., 1]),
+            )
+            window_col = (cx * n_x).long().clamp(0, n_x - 1)
+            window_row = (cy * n_y).long().clamp(0, n_y - 1)
+
+            selected_mask = defe_window_mask[
+                torch.arange(B, device=device).view(-1, 1),
+                window_row,
+                window_col,
+            ]
+        else:
+            selected_mask = torch.ones_like(anchors_second[..., 0], dtype=torch.bool)
+
+        # One host read for all images; each image's selected candidates are then
+        # gathered in their original order through a stable sort, which (unlike
+        # boolean-mask indexing) needs no sync of its own.
+        num_selected = selected_mask.sum(1).tolist()
+        selected_order = torch.argsort((~selected_mask).to(torch.uint8), dim=1, stable=True)
+
+        # Process each batch and combine valid anchors
+        combined_memory, combined_logits, combined_bbox_unact = [], [], []
+        total_per_batch = []
+
+        # Do class-based NMS anchor selection
+        for b in range(B):
+            sel = selected_order[b, : num_selected[b]]
+            mem_second = memory_second[b][sel]
+            log_second = logits_second[b][sel]
+            anc_second = anchors_second[b][sel]
+
+            mem_combined = torch.cat([memory_first[b], mem_second], dim=0)
+            log_combined = torch.cat([logits_first[b], log_second], dim=0)
+            anc_combined = torch.cat([anchors_first[b], anc_second], dim=0)
+
+            bbox_combined_unact = self.enc_bbox_head(mem_combined) + anc_combined
+            bbox_combined = F.sigmoid(bbox_combined_unact)
+
+            # 执行基于类别的NMS -- it can only drop density-selected candidates (the
+            # first min_num are kept regardless), so it is skipped when there are none
+            if log_combined.size(0) > 0 and num_selected[b] > 0:
+                # 转换anchor到边界框格式[x1, y1, x2, y2]
+                cx = bbox_combined[:, 0]
+                cy = bbox_combined[:, 1]
+                w = bbox_combined[:, 2]
+                h = bbox_combined[:, 3]
+                x1 = cx - w / 2
+                y1 = cy - h / 2
+                x2 = cx + w / 2
+                y2 = cy + h / 2
+                boxes = torch.stack([x1, y1, x2, y2], dim=1)
+
+                # 在合并候选框后计算中心坐标
+                cf_h, cf_w = defe_feature.shape[2:]
+                window_row = (cx * (cf_w - 1)).long().clamp(0, cf_w - 1)
+                window_col = (cy * (cf_h - 1)).long().clamp(0, cf_h - 1)
+                density_values = defe_feature[b, :, window_row, window_col].squeeze(0).detach()  # 形状 (num_queries,)
+
+                iou_thresholds = 0.4 + 0.5 * density_values
+
+                # 获取每个anchor的类别分数和类别ID
+                scores, class_ids = log_combined.max(dim=1)
+
+                # 应用NMS (kept indices come back on the host, ascending)
+                keep_idx = dynamic_nms_indices(boxes, scores, class_ids, iou_thresholds)
+
+                # 前min_num个anchor不进行NMS
+                final_keep_idx = np.concatenate([np.arange(min_num), keep_idx[keep_idx >= min_num]])
+                final_keep_idx = host_to_device(final_keep_idx, device, dtype=torch.int64)
+
+                mem_combined = mem_combined[final_keep_idx]
+                log_combined = log_combined[final_keep_idx]
+                bbox_combined_unact = bbox_combined_unact[final_keep_idx]
+
+            combined_memory.append(mem_combined)
+            combined_logits.append(log_combined)
+            combined_bbox_unact.append(bbox_combined_unact)
+            total_per_batch.append(mem_combined.size(0))
+
+        # Pad to max number of anchors across batches
+        max_total = max(total_per_batch)
+        padded_memory = torch.zeros((B, max_total, memory_first.size(-1)), device=device)
+        padded_logits = torch.zeros((B, max_total, num_classes), device=device)
+        padded_bbox_unact = torch.zeros((B, max_total, 4), device=device)
+        batch_queries_num = []
+
+        for b in range(B):
+            current_len = total_per_batch[b]
+            padded_memory[b, :current_len] = combined_memory[b]
+            padded_logits[b, :current_len] = combined_logits[b]
+            padded_bbox_unact[b, :current_len] = combined_bbox_unact[b]
+            batch_queries_num.append(current_len)
+
+        return padded_memory, padded_logits, padded_bbox_unact, batch_queries_num
+
     def _select_topk(
         self,
         memory: torch.Tensor,
         outputs_logits: torch.Tensor,
         outputs_anchors_unact: torch.Tensor,
         topk: int,
+        return_index: bool = False,
     ):
         if self.query_select_method == "default":
             _, topk_ind = torch.topk(outputs_logits.max(-1).values, topk, dim=-1)
@@ -969,6 +1044,8 @@ class DomeTransformer(nn.Module):
 
         topk_memory = memory.gather(dim=1, index=topk_ind.unsqueeze(-1).repeat(1, 1, memory.shape[-1]))
 
+        if return_index:
+            return topk_memory, topk_logits, topk_anchors, topk_ind
         return topk_memory, topk_logits, topk_anchors
 
     def forward(self, encoder_out, targets=None):

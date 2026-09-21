@@ -11,6 +11,7 @@ import torch.utils.data as data
 import torchvision
 
 from ..core import register
+from ._misc import EpochMixin
 
 
 torchvision.disable_beta_transforms_warning()
@@ -28,6 +29,53 @@ __all__ = [
 @register()
 class DataLoader(data.DataLoader):
     __inject__ = ["dataset", "collate_fn"]
+
+    def __init__(
+        self,
+        dataset,
+        batch_size=1,
+        shuffle=None,
+        sampler=None,
+        batch_sampler=None,
+        num_workers=0,
+        collate_fn=None,
+        pin_memory=None,
+        drop_last=False,
+        **kwargs,
+    ):
+        """Defaults tuned for a GPU training loop (each can still be set in the config):
+
+        - ``pin_memory``: on when CUDA is available, so batches are copied to the
+          GPU asynchronously (the training loop uses ``non_blocking=True``);
+        - ``persistent_workers``: on when there are workers, so they are not torn
+          down and re-spawned (re-reading the annotations) for every epoch and
+          every evaluation. The epoch that dataset / collate_fn policies read is
+          shared with the workers, see ``EpochMixin``.
+        """
+        if pin_memory is None:
+            pin_memory = torch.cuda.is_available()
+        if num_workers > 0:
+            if kwargs.get("persistent_workers") is None:
+                kwargs["persistent_workers"] = True
+        else:
+            kwargs.pop("persistent_workers", None)
+            kwargs.pop("prefetch_factor", None)
+        if kwargs.get("persistent_workers"):
+            for obj in (dataset, collate_fn):
+                if hasattr(obj, "init_shared_epoch"):
+                    obj.init_shared_epoch()
+        super().__init__(
+            dataset,
+            batch_size,
+            shuffle,
+            sampler,
+            batch_sampler,
+            num_workers,
+            collate_fn,
+            pin_memory,
+            drop_last,
+            **kwargs,
+        )
 
     def __repr__(self) -> str:
         format_string = self.__class__.__name__ + "("
@@ -62,14 +110,7 @@ def batch_image_collate_fn(items):
     return torch.cat([x[0][None] for x in items], dim=0), [x[1] for x in items]
 
 
-class BaseCollateFunction:
-    def set_epoch(self, epoch):
-        self._epoch = epoch
-
-    @property
-    def epoch(self):
-        return self._epoch if hasattr(self, "_epoch") else -1
-
+class BaseCollateFunction(EpochMixin):
     def __call__(self, items):
         raise NotImplementedError("")
 

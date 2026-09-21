@@ -35,6 +35,31 @@ SAVE_INTERMEDIATE_VISUALIZE_RESULT = os.getenv("SAVE_INTERMEDIATE_VISUALIZE_RESU
 SAVE_TEST_VISUALIZE_RESULT = os.environ.get("SAVE_TEST_VISUALIZE_RESULT", "False").lower() in TRUE_FLAGS
 
 
+def targets_to_device(targets, device):
+    """Copy the targets over without blocking (the loader pins them) and drop the
+    torchvision tv_tensor subclasses: every op on those goes through a Python
+    ``__torch_function__`` hook, and nothing past the transforms needs them."""
+    return [{k: v.as_subclass(torch.Tensor).to(device, non_blocking=True) for k, v in t.items()} for t in targets]
+
+
+def results_to_cpu(results):
+    """Postprocessor results -> CPU with one copy per key for the whole batch
+    (the evaluator's per-image ``.tolist()`` calls were three syncs per image)."""
+    if not results:
+        return results
+    out = [dict() for _ in results]
+    for k in results[0]:
+        tensors = [r[k] for r in results]
+        if not all(isinstance(t, torch.Tensor) and t.dtype == tensors[0].dtype for t in tensors):
+            for o, t in zip(out, tensors):
+                o[k] = t.cpu() if isinstance(t, torch.Tensor) else t
+            continue
+        flat = torch.cat([t.reshape(-1) for t in tensors]).cpu()
+        for o, t, part in zip(out, tensors, flat.split([t.numel() for t in tensors])):
+            o[k] = part.view(t.shape)
+    return out
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
@@ -62,9 +87,10 @@ def train_one_epoch(
     scaler: GradScaler = kwargs.get("scaler", None)
     lr_warmup_scheduler: Warmup = kwargs.get("lr_warmup_scheduler", None)
 
+    device_type = torch.device(device).type
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        samples = samples.to(device, non_blocking=True)
+        targets = targets_to_device(targets, device)
         global_step = epoch * len(data_loader) + i
         metas = dict(epoch=epoch, step=i, global_step=global_step, epoch_step=len(data_loader))
 
@@ -81,10 +107,10 @@ def train_one_epoch(
                 visualize_detection(image, target_cpu, "sample_gt", return_image=False, type="xywh")
 
         if scaler is not None:
-            with torch.autocast(device_type=str(device), cache_enabled=True):
+            with torch.autocast(device_type=device_type, cache_enabled=True):
                 outputs = model(samples, targets=targets)
 
-            if torch.isnan(outputs["pred_boxes"]).any() or torch.isinf(outputs["pred_boxes"]).any():
+            if not bool(torch.isfinite(outputs["pred_boxes"]).all()):  # one sync instead of two
                 print(outputs["pred_boxes"])
                 state = model.state_dict()
                 new_state = {}
@@ -96,7 +122,7 @@ def train_one_epoch(
                 new_state["model"] = state
                 dist_utils.save_on_master(new_state, "./NaN.pth")
 
-            with torch.autocast(device_type=str(device), enabled=False):
+            with torch.autocast(device_type=device_type, enabled=False):
                 loss_dict = criterion(outputs, targets, **metas)
 
             loss = sum(loss_dict.values())
@@ -133,6 +159,11 @@ def train_one_epoch(
         loss_dict_reduced = dist_utils.reduce_dict(loss_dict)
         loss_value = sum(loss_dict_reduced.values())
 
+        # Everything that gets logged comes to the host in one copy; each `.item()`
+        # (one per loss term, ~60 of them) used to be its own sync.
+        logged = torch.stack([v.detach().float() for v in [loss_value, *loss_dict_reduced.values()]]).tolist()
+        loss_value, loss_dict_reduced = logged[0], dict(zip(loss_dict_reduced.keys(), logged[1:]))
+
         if not math.isfinite(loss_value):
             print(f"Loss is {loss_value}, stopping training")
             print(loss_dict_reduced)
@@ -142,11 +173,11 @@ def train_one_epoch(
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
         if writer and dist_utils.is_main_process() and global_step % 10 == 0:
-            writer.add_scalar("Loss/total", loss_value.item(), global_step)
+            writer.add_scalar("Loss/total", loss_value, global_step)
             for j, pg in enumerate(optimizer.param_groups):
                 writer.add_scalar(f"Lr/pg_{j}", pg["lr"], global_step)
             for k, v in loss_dict_reduced.items():
-                writer.add_scalar(f"Loss/{k}", v.item(), global_step)
+                writer.add_scalar(f"Loss/{k}", v, global_step)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -196,12 +227,14 @@ def evaluate(
         pending_futures = []
 
         for samples, targets in metric_logger.log_every(data_loader, 10, header):
-            samples = samples.to(device)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
+            # read on the host before the copy: `.item()` on the device copy is a sync per image
             image_ids = [t["image_id"].item() for t in targets]
-            coco = data_loader.dataset.coco
-            file_names = [coco.loadImgs(id)[0]["file_name"] for id in image_ids]
+            samples = samples.to(device, non_blocking=True)
+            targets = targets_to_device(targets, device)
+
+            if SAVE_TEST_VISUALIZE_RESULT:
+                coco = data_loader.dataset.coco
+                file_names = [coco.loadImgs(id)[0]["file_name"] for id in image_ids]
 
             outputs = model(samples, targets=None)
             orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
@@ -242,7 +275,7 @@ def evaluate(
                     future = executor.submit(process_image_pair, args)
                     pending_futures.append(future)
 
-            res = {target["image_id"].item(): output for target, output in zip(targets, results)}
+            res = dict(zip(image_ids, results_to_cpu(results)))
             if coco_evaluator is not None:
                 coco_evaluator.update(res)
 

@@ -16,8 +16,9 @@ import torchvision
 
 from ...core import register
 from ...misc.dist_utils import get_world_size, is_dist_available_and_initialized
-from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+from .box_ops import box_cxcywh_to_xyxy, paired_box_iou, paired_generalized_box_iou
 from .dome_utils import bbox2distance
+from .utils import host_to_device
 
 
 @register()
@@ -65,6 +66,7 @@ class DomeCriterion(nn.Module):
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
         self.num_pos, self.num_neg = None, None
+        self._target_cache = {}
         self.defe_density_map_weight = defe_density_map_weight
         self.density_recall_penalty = density_recall_penalty
         self.mal_alpha = mal_alpha
@@ -74,7 +76,7 @@ class DomeCriterion(nn.Module):
         assert "pred_logits" in outputs
         src_logits = outputs["pred_logits"]
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes_o = self._matched_targets(targets, indices, "labels")
         target_classes = torch.full(
             src_logits.shape[:2],
             self.num_classes,
@@ -101,14 +103,14 @@ class DomeCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         if values is None:
             src_boxes = outputs["pred_boxes"][idx]
-            target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
-            ious = torch.diag(ious).detach()
+            target_boxes = self._matched_targets(targets, indices, "boxes")
+            ious, _ = paired_box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
+            ious = ious.detach()
         else:
             ious = values
 
         src_logits = outputs["pred_logits"]
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes_o = self._matched_targets(targets, indices, "labels")
         target_classes = torch.full(
             src_logits.shape[:2],
             self.num_classes,
@@ -142,14 +144,14 @@ class DomeCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         if values is None:
             src_boxes = outputs["pred_boxes"][idx]
-            target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
-            ious = torch.diag(ious).detach()
+            target_boxes = self._matched_targets(targets, indices, "boxes")
+            ious, _ = paired_box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
+            ious = ious.detach()
         else:
             ious = values
 
         src_logits = outputs["pred_logits"]
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes_o = self._matched_targets(targets, indices, "labels")
         target_classes = torch.full(
             src_logits.shape[:2],
             self.num_classes,
@@ -191,14 +193,12 @@ class DomeCriterion(nn.Module):
         assert "pred_boxes" in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs["pred_boxes"][idx]
-        target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = self._matched_targets(targets, indices, "boxes")
         losses = {}
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="none")
         losses["loss_bbox"] = loss_bbox.sum() / num_boxes
 
-        loss_giou = 1 - torch.diag(
-            generalized_box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
-        )
+        loss_giou = 1 - paired_generalized_box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
         loss_giou = loss_giou if boxes_weight is None else loss_giou * boxes_weight
         losses["loss_giou"] = loss_giou.sum() / num_boxes
 
@@ -211,7 +211,7 @@ class DomeCriterion(nn.Module):
         losses = {}
         if "pred_corners" in outputs:
             idx = self._get_src_permutation_idx(indices)
-            target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0)
+            target_boxes = self._matched_targets(targets, indices, "boxes")
 
             pred_corners = outputs["pred_corners"][idx].reshape(-1, (self.reg_max + 1))
             ref_points = outputs["ref_points"][idx].detach()
@@ -235,12 +235,10 @@ class DomeCriterion(nn.Module):
 
             target_corners, weight_right, weight_left = self.fgl_targets_dn if "is_dn" in outputs else self.fgl_targets
 
-            ious = torch.diag(
-                box_iou(
-                    box_cxcywh_to_xyxy(outputs["pred_boxes"][idx]),
-                    box_cxcywh_to_xyxy(target_boxes),
-                )[0]
-            )
+            ious = paired_box_iou(
+                box_cxcywh_to_xyxy(outputs["pred_boxes"][idx]),
+                box_cxcywh_to_xyxy(target_boxes),
+            )[0]
             weight_targets = ious.unsqueeze(-1).repeat(1, 1, 4).reshape(-1).detach()
 
             losses["loss_fgl"] = self.unimodal_distribution_focal_loss(
@@ -255,9 +253,13 @@ class DomeCriterion(nn.Module):
             if "teacher_corners" in outputs:
                 pred_corners = outputs["pred_corners"].reshape(-1, (self.reg_max + 1))
                 target_corners = outputs["teacher_corners"].reshape(-1, (self.reg_max + 1))
-                if torch.equal(pred_corners, target_corners):
+                if outputs["pred_corners"] is outputs["teacher_corners"]:
+                    # the last layer is its own teacher
                     losses["loss_ddf"] = pred_corners.sum() * 0
                 else:
+                    # Everything below stays on the device: `torch.equal`, `mask.any()`
+                    # and boolean-mask indexing each used to stall the host.
+                    same = (pred_corners == target_corners).all()
                     weight_targets_local = outputs["teacher_logits"].sigmoid().max(dim=-1)[0]
 
                     mask = torch.zeros_like(weight_targets_local, dtype=torch.bool)
@@ -279,17 +281,21 @@ class DomeCriterion(nn.Module):
                             )
                         ).sum(-1)
                     )
+                    num_pos = mask.sum()
+                    num_neg = mask.numel() - num_pos
                     if "is_dn" not in outputs:
                         batch_scale = 8 / outputs["pred_boxes"].shape[0]  # Avoid the influence of batch size per GPU
                         self.num_pos, self.num_neg = (
-                            (mask.sum() * batch_scale) ** 0.5,
-                            ((~mask).sum() * batch_scale) ** 0.5,
+                            (num_pos * batch_scale) ** 0.5,
+                            (num_neg * batch_scale) ** 0.5,
                         )
-                    loss_match_local1 = loss_match_local[mask].mean() if mask.any() else 0
-                    loss_match_local2 = loss_match_local[~mask].mean() if (~mask).any() else 0
-                    losses["loss_ddf"] = (loss_match_local1 * self.num_pos + loss_match_local2 * self.num_neg) / (
+                    # mean over the positives / negatives, 0 when there are none
+                    loss_match_local1 = torch.where(mask, loss_match_local, 0.0).sum() / num_pos.clamp(min=1)
+                    loss_match_local2 = torch.where(mask, 0.0, loss_match_local).sum() / num_neg.clamp(min=1)
+                    loss_ddf = (loss_match_local1 * self.num_pos + loss_match_local2 * self.num_neg) / (
                         self.num_pos + self.num_neg
                     )
+                    losses["loss_ddf"] = torch.where(same, pred_corners.sum() * 0, loss_ddf)
 
         return losses
 
@@ -305,6 +311,18 @@ class DomeCriterion(nn.Module):
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
+    def _matched_targets(self, targets, indices, key):
+        """``torch.cat([t[key][j] for t, (_, j) in zip(targets, indices)])``, computed
+        once per (targets, indices) pair per step instead of once per loss term."""
+        cache_key = (id(targets), id(indices), key)
+        hit = self._target_cache.get(cache_key)
+        if hit is not None and hit[0] is targets and hit[1] is indices:
+            return hit[2]
+        value = torch.cat([t[key][j] for t, (_, j) in zip(targets, indices)], dim=0)
+        # the refs keep both objects alive, so their ids cannot be reused this step
+        self._target_cache[cache_key] = (targets, indices, value)
+        return value
+
     def _get_go_indices(self, indices, indices_aux_list):
         """Get a matching union set across all decoder layers."""
         results = []
@@ -318,20 +336,48 @@ class DomeCriterion(nn.Module):
             unique, counts = torch.unique(ind, return_counts=True, dim=0)
             count_sort_indices = torch.argsort(counts, descending=True)
             unique_sorted = unique[count_sort_indices]
-            column_to_row = {}
-            for idx in unique_sorted:
-                row_idx, col_idx = idx[0].item(), idx[1].item()
-                if row_idx not in column_to_row:
-                    column_to_row[row_idx] = col_idx
-            final_rows = torch.tensor(list(column_to_row.keys()), device=ind.device)
-            final_cols = torch.tensor(list(column_to_row.values()), device=ind.device)
-            results.append((final_rows.long(), final_cols.long()))
+            # For every query keep the target of its first appearance in
+            # `unique_sorted`, in order of first appearance (what the per-row
+            # dict walk did, without a Python loop over `.item()` calls).
+            rows, cols = unique_sorted[:, 0], unique_sorted[:, 1]
+            if len(rows):
+                _, inverse = torch.unique(rows, return_inverse=True)
+                first = torch.full((int(inverse.max()) + 1,), len(rows), dtype=torch.int64)
+                first.scatter_reduce_(0, inverse, torch.arange(len(rows)), reduce="amin")
+                first = first.sort().values
+                rows, cols = rows[first], cols[first]
+            results.append((rows.long(), cols.long()))
         return results
+
+    @staticmethod
+    def _indices_to_device(index_sets, device):
+        """Move lists of (src, tgt) index pairs to ``device`` in one copy.
+
+        Indexing a GPU tensor with a CPU index tensor copies the index over and
+        synchronises every time; the losses do that hundreds of times per step.
+        """
+        flat = [t for index_set in index_sets for pair in index_set for t in pair]
+        if not flat or torch.device(device).type == "cpu":
+            return index_sets
+        moved = host_to_device(torch.cat(flat), device).split([len(t) for t in flat])
+        it = iter(moved)
+        return [[(next(it), next(it)) for _ in index_set] for index_set in index_sets]
+
+    @staticmethod
+    def _average_num_boxes(counts, device):
+        """Per-process average of each count (clamped to >= 1), one all_reduce for all."""
+        if is_dist_available_and_initialized():
+            counts = torch.as_tensor(counts, dtype=torch.float, device=device)
+            torch.distributed.all_reduce(counts)
+            return torch.clamp(counts / get_world_size(), min=1).tolist()
+        # identical to the float32 round trip above for any count below 2**24
+        return [float(max(c, 1)) for c in counts]
 
     def _clear_cache(self):
         self.fgl_targets, self.fgl_targets_dn = None, None
         self.own_targets, self.own_targets_dn = None, None
         self.num_pos, self.num_neg = None, None
+        self._target_cache = {}
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
@@ -352,43 +398,41 @@ class DomeCriterion(nn.Module):
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
         outputs_without_aux = {k: v for k, v in outputs.items() if "aux" not in k}
+        device = outputs["pred_logits"].device
         batch_queries_num = outputs.get("batch_queries_num")
+        if batch_queries_num is not None:
+            # once here rather than a blocking host-to-device copy in every loss term
+            batch_queries_num = host_to_device(batch_queries_num, device)
 
-        # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)["indices"]
         self._clear_cache()
+        assert "aux_outputs" in outputs, ""
+
+        # Match the last layer, every auxiliary layer, the pre-head and the
+        # encoder head in one go: one device-to-host copy for all cost matrices.
+        num_aux = len(outputs["aux_outputs"]) + 1
+        to_match = (
+            [outputs_without_aux] + outputs["aux_outputs"] + [outputs["pre_outputs"]] + outputs["enc_aux_outputs"]
+        )
+        if hasattr(self.matcher, "match_many"):
+            all_indices = self.matcher.match_many(to_match, targets)
+        else:
+            all_indices = [self.matcher(o, targets)["indices"] for o in to_match]
+        indices = all_indices[0]
+        cached_indices = all_indices[1 : 1 + num_aux]
+        cached_indices_enc = all_indices[1 + num_aux :]
 
         # Get the matching union set across all decoder layers.
-        if "aux_outputs" in outputs:
-            indices_aux_list, cached_indices, cached_indices_enc = [], [], []
-            for i, aux_outputs in enumerate(outputs["aux_outputs"] + [outputs["pre_outputs"]]):
-                indices_aux = self.matcher(aux_outputs, targets)["indices"]
-                cached_indices.append(indices_aux)
-                indices_aux_list.append(indices_aux)
-            for i, aux_outputs in enumerate(outputs["enc_aux_outputs"]):
-                indices_enc = self.matcher(aux_outputs, targets)["indices"]
-                cached_indices_enc.append(indices_enc)
-                indices_aux_list.append(indices_enc)
-            indices_go = self._get_go_indices(indices, indices_aux_list)
-
-            num_boxes_go = sum(len(x[0]) for x in indices_go)
-            num_boxes_go = torch.as_tensor(
-                [num_boxes_go],
-                dtype=torch.float,
-                device=next(iter(outputs.values())).device,
-            )
-            if is_dist_available_and_initialized():
-                torch.distributed.all_reduce(num_boxes_go)
-            num_boxes_go = torch.clamp(num_boxes_go / get_world_size(), min=1).item()
-        else:
-            assert "aux_outputs" in outputs, ""
+        indices_go = self._get_go_indices(indices, cached_indices + cached_indices_enc)
+        num_boxes_go = sum(len(x[0]) for x in indices_go)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
-        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
-        if is_dist_available_and_initialized():
-            torch.distributed.all_reduce(num_boxes)
-        num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
+        num_boxes_go, num_boxes = self._average_num_boxes([num_boxes_go, num_boxes], device)
+
+        indices, indices_go, *rest = self._indices_to_device(
+            [indices, indices_go] + cached_indices + cached_indices_enc, device
+        )
+        cached_indices, cached_indices_enc = rest[:num_aux], rest[num_aux:]
 
         # Compute all the requested losses
         losses = {}
@@ -550,15 +594,18 @@ class DomeCriterion(nn.Module):
 
                 reg_targets.append(target_val)
 
-            reg_targets = torch.tensor(reg_targets, dtype=torch.int64).to(outputs["defe"]["reg_value"].device)
+            # NOTE: the int64 cast truncates every target in [0, 1) to 0 -- kept
+            # as is so the loss matches the released checkpoints' training.
+            reg_targets = host_to_device(reg_targets, outputs["defe"]["reg_value"].device, dtype=torch.int64)
             reg_value = outputs["defe"]["reg_value"]
 
             with torch.amp.autocast("cuda", dtype=torch.float16):
                 diff = reg_value - reg_targets
                 penalty_weights = torch.where(diff < 0, 2.0, 1.0).to(diff.device)
                 defe_reg_loss = (penalty_weights * (diff**2)).mean()
-            del reg_value, reg_targets
-            torch.cuda.empty_cache()
+            # (no torch.cuda.empty_cache() here: it returned every cached block to
+            # the driver twice per step, so the next step had to cudaMalloc it all
+            # back -- slow and synchronising, and it does not lower the peak)
             losses["defe_reg_loss"] = defe_reg_loss
 
             # Calculate defe Density Map Loss with emphasis on high GT regions
@@ -569,12 +616,11 @@ class DomeCriterion(nn.Module):
                 underestimation_mask = (density_map < gt_density_map).float()
                 penalty_weight = 1 + self.density_recall_penalty * gt_density_map * underestimation_mask
                 defe_density_loss = (penalty_weight * (diff**2)).mean() * self.defe_density_map_weight
-            del density_map, gt_density_map
-            torch.cuda.empty_cache()
             losses["defe_density_loss"] = defe_density_loss
 
         # For debugging Objects365 pre-train.
         losses = {k: torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
+        self._target_cache = {}
         return losses
 
     def get_loss_meta_info(self, loss, outputs, targets, indices):
@@ -582,17 +628,14 @@ class DomeCriterion(nn.Module):
             return {}
 
         src_boxes = outputs["pred_boxes"][self._get_src_permutation_idx(indices)]
-        target_boxes = torch.cat([t["boxes"][j] for t, (_, j) in zip(targets, indices)], dim=0)
+        target_boxes = self._matched_targets(targets, indices, "boxes")
 
         if self.boxes_weight_format == "iou":
-            iou, _ = box_iou(box_cxcywh_to_xyxy(src_boxes.detach()), box_cxcywh_to_xyxy(target_boxes))
-            iou = torch.diag(iou)
+            iou, _ = paired_box_iou(box_cxcywh_to_xyxy(src_boxes.detach()), box_cxcywh_to_xyxy(target_boxes))
         elif self.boxes_weight_format == "giou":
-            iou = torch.diag(
-                generalized_box_iou(
-                    box_cxcywh_to_xyxy(src_boxes.detach()),
-                    box_cxcywh_to_xyxy(target_boxes),
-                )
+            iou = paired_generalized_box_iou(
+                box_cxcywh_to_xyxy(src_boxes.detach()),
+                box_cxcywh_to_xyxy(target_boxes),
             )
         else:
             raise AttributeError()

@@ -75,7 +75,11 @@ def get_contrastive_denoising_training_group(
     positive_gt_mask = 1 - negative_gt_mask
     # contrastive denoising training positive index
     positive_gt_mask = positive_gt_mask.squeeze(-1) * pad_gt_mask
-    dn_positive_idx = torch.nonzero(positive_gt_mask)[:, 1]
+    if hasattr(torch, "nonzero_static"):
+        # the number of positives is known on the host, so no sync is needed to size the result
+        dn_positive_idx = torch.nonzero_static(positive_gt_mask, size=sum(num_gts) * num_group)[:, 1]
+    else:
+        dn_positive_idx = torch.nonzero(positive_gt_mask)[:, 1]
     dn_positive_idx = torch.split(dn_positive_idx, [n * num_group for n in num_gts])
     # total denoising queries
     num_denoising = int(max_gt_num * 2 * num_group)
@@ -102,7 +106,9 @@ def get_contrastive_denoising_training_group(
         known_bbox += rand_sign * rand_part * diff
         known_bbox = torch.clip(known_bbox, min=0.0, max=1.0)
         input_query_bbox = box_xyxy_to_cxcywh(known_bbox)
-        input_query_bbox[input_query_bbox < 0] *= -1
+        # same as `input_query_bbox[input_query_bbox < 0] *= -1`, without the sync a
+        # boolean-mask index costs
+        input_query_bbox = torch.where(input_query_bbox < 0, input_query_bbox * -1, input_query_bbox)
         input_query_bbox_unact = inverse_sigmoid(input_query_bbox)
 
     input_query_logits = class_embed(input_query_class)

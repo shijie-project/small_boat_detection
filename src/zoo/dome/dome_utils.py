@@ -77,33 +77,32 @@ def translate_gt(gt, reg_max, reg_scale, up):
     # Calculate the weights for the interpolation
     indices = closest_left_indices.float()
 
-    weight_right = torch.zeros_like(indices)
-    weight_left = torch.zeros_like(indices)
-
+    # Computed for every entry and selected with `where`: boolean-mask indexing
+    # would need a device sync per mask to size its output.
     valid_idx_mask = (indices >= 0) & (indices < reg_max)
-    valid_indices = indices[valid_idx_mask].long()
+    safe_indices = closest_left_indices.clamp(0, reg_max - 1)
 
     # Obtain distances
-    left_values = function_values[valid_indices]
-    right_values = function_values[valid_indices + 1]
+    left_values = function_values[safe_indices]
+    right_values = function_values[safe_indices + 1]
 
-    left_diffs = torch.abs(gt[valid_idx_mask] - left_values)
-    right_diffs = torch.abs(right_values - gt[valid_idx_mask])
+    left_diffs = torch.abs(gt - left_values)
+    right_diffs = torch.abs(right_values - gt)
 
     # Valid weights
-    weight_right[valid_idx_mask] = left_diffs / (left_diffs + right_diffs)
-    weight_left[valid_idx_mask] = 1.0 - weight_right[valid_idx_mask]
+    weight_right = torch.where(valid_idx_mask, (left_diffs / (left_diffs + right_diffs)).to(indices.dtype), 0.0)
+    weight_left = torch.where(valid_idx_mask, 1.0 - weight_right, 0.0)
 
     # Invalid weights (out of range)
     invalid_idx_mask_neg = indices < 0
-    weight_right[invalid_idx_mask_neg] = 0.0
-    weight_left[invalid_idx_mask_neg] = 1.0
-    indices[invalid_idx_mask_neg] = 0.0
+    weight_right = torch.where(invalid_idx_mask_neg, 0.0, weight_right)
+    weight_left = torch.where(invalid_idx_mask_neg, 1.0, weight_left)
+    indices = torch.where(invalid_idx_mask_neg, 0.0, indices)
 
     invalid_idx_mask_pos = indices >= reg_max
-    weight_right[invalid_idx_mask_pos] = 1.0
-    weight_left[invalid_idx_mask_pos] = 0.0
-    indices[invalid_idx_mask_pos] = reg_max - 0.1
+    weight_right = torch.where(invalid_idx_mask_pos, 1.0, weight_right)
+    weight_left = torch.where(invalid_idx_mask_pos, 0.0, weight_left)
+    indices = torch.where(invalid_idx_mask_pos, reg_max - 0.1, indices)
 
     return indices, weight_right, weight_left
 

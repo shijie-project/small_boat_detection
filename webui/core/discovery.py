@@ -31,6 +31,11 @@ def list_configs():
     return [rel(p) for p in sorted(CONFIG_DIR.glob("*.yml"))]
 
 
+def list_aea_configs():
+    """The configs of the AEA small-boat recipe (``*-AEA.yml``), what training here uses."""
+    return [c for c in list_configs() if c.upper().endswith("AEA.YML")]
+
+
 def list_checkpoints():
     """The weights worth picking: a run's ``best_stg*.pth`` and the kept ``*-best.pth``.
 
@@ -164,6 +169,7 @@ def options():
     """Everything the page needs to build its forms."""
     return {
         "configs": list_configs(),
+        "aea_configs": list_aea_configs(),
         "checkpoints": list_checkpoints(),
         "satellite": list_satellite_dirs(),
         "tiles": list_tile_dirs(),

@@ -58,7 +58,7 @@ class TrainFeature(Feature):
             "config",
             "Config (-c)",
             kind="choice",
-            source="configs",
+            source="aea_configs",
             value="configs/dome/Dome-M-AEA.yml",
             prefer="AEA",
         ),
@@ -80,7 +80,7 @@ class TrainFeature(Feature):
 
         # start on the pretrained weights of the default config's size
         config_field = self.fields[0]
-        start_config = default_of(config_field, list(options.get("configs", [])))
+        start_config = default_of(config_field, list(options.get(config_field.source, [])))
         fields = list(self.fields)
         fields[1] = dataclasses.replace(fields[1], value=pretrained_for(start_config, options.get("checkpoints", [])))
         inputs = render_fields(fields, options)

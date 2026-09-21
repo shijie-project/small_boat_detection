@@ -29,7 +29,7 @@ class TestFeature(Feature):
             "config",
             "Config (-c)",
             kind="choice",
-            source="configs",
+            source="aea_configs",
             value="configs/dome/Dome-M-AEA.yml",
             prefer="AEA",
         ),

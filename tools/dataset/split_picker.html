@@ -6,42 +6,59 @@
 <style>
   :root {
     --bg: #14171c; --panel: #1c2027; --line: #2c323c; --text: #e6e9ef; --dim: #96a0b0;
-    --pick: #ffb020; --cut: #4a9dff; --accent: #ff7a45;
+    --pick: #ffb020; --cut: #4a9dff; --moved: #78ffbe; --accent: #ff7a45; --danger: #e5645a;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden;
     background: var(--bg); color: var(--text);
     font: 13px/1.4 "Segoe UI", system-ui, sans-serif; }
-  #app { display: flex; flex-direction: column; height: 100%; }
+  #app { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
 
-  .bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    padding: 8px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 7px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
   .bar .grow { flex: 1; }
+  .sep { width: 1px; height: 22px; background: var(--line); margin: 0 3px; }
   select, button { font: inherit; color: var(--text); background: #262c35;
     border: 1px solid var(--line); border-radius: 5px; padding: 5px 9px; cursor: pointer; }
-  select { max-width: 46vw; }
   #scene { max-width: 420px; }  /* the scene names are long; the toolbar is not */
   button:hover { background: #303845; }
-  button:disabled { opacity: .45; cursor: default; }
+  button:disabled { opacity: .4; cursor: default; }
+  button:disabled:hover { background: #262c35; }
   button.go { background: var(--accent); border-color: var(--accent); color: #191919; font-weight: 600; }
-  button.go:hover { filter: brightness(1.08); }
+  button.go:hover { filter: brightness(1.08); background: var(--accent); }
+  button.danger { color: var(--danger); border-color: #5a2a27; }
+  button.danger:not(:disabled):hover { background: #3a2220; }
   .chip { padding: 4px 8px; border-radius: 5px; background: #262c35; color: var(--dim); white-space: nowrap; }
   .chip b { color: var(--text); }
+  .chip:empty { display: none; }
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px;
     vertical-align: -1px; }
+  #saved.bad { color: var(--danger); }
 
-  #stage { position: relative; flex: 1; overflow: hidden; }
-  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
-  canvas.panning { cursor: grabbing; }
+  #stage { position: relative; flex: 1; min-height: 0; }
+  #osd { position: absolute; inset: 0; background: var(--bg); }
+  #grid { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 15px; pointer-events: none; }
 
-  #hint { position: absolute; left: 10px; bottom: 10px; padding: 6px 10px; border-radius: 6px;
-    background: rgba(20,23,28,.82); color: var(--dim); pointer-events: none; }
+  #hint { position: absolute; left: 10px; bottom: 10px; max-width: calc(100% - 260px);
+    padding: 6px 10px; border-radius: 6px; background: rgba(20,23,28,.85); color: var(--dim);
+    pointer-events: none; }
   #hint b { color: var(--text); }
+  #hint .keys { margin-top: 2px; font-size: 12px; }
   #toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
     padding: 8px 14px; border-radius: 6px; background: rgba(20,23,28,.94);
     border: 1px solid var(--line); opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.on { opacity: 1; }
   #toast.bad { border-color: #b4453a; color: #ff9d92; }
+  #confirm { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); z-index: 5;
+    max-width: 480px; padding: 12px 14px; border-radius: 8px; background: var(--panel);
+    border: 1px solid #5a2a27; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+  #confirm[hidden] { display: none; }
+  #confirm code { color: var(--text); word-break: break-all; }
+  #confirm .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+  #confirm .yes { background: #7a2b25; border-color: #7a2b25; }
+  #confirm .yes:hover { background: #8e332c; }
 </style>
 </head>
 <body>
@@ -49,54 +66,109 @@
   <div class="bar">
     <select id="scene" title="scene"></select>
     <button id="rescan" title="look for new scenes">&#x21bb;</button>
-    <button id="fit" title="fit the whole scene">Fit</button>
-    <button id="full" title="1 image pixel per screen pixel">100%</button>
-    <button id="zoomOut">&minus;</button>
-    <button id="zoomIn">+</button>
-    <span class="chip" id="zoomChip">100%</span>
+    <span class="sep"></span>
+    <button id="fit" title="the whole scene (F)">Fit</button>
+    <button id="actual" title="one image pixel per screen pixel">1:1</button>
+    <span class="chip" id="zoomChip">–</span>
     <span class="grow"></span>
-    <button id="all">Select all</button>
-    <button id="none">Clear</button>
-    <button id="invert">Invert</button>
-    <button id="reset" title="put the picked cells (or all of them) back on the grid">Reset</button>
-    <button id="save" title="write layout.json beside the tiles">Save</button>
-    <select id="format" title="tile format"><option value="png">png</option><option value="jpg">jpg</option></select>
+    <button id="all" title="pick every cell (Ctrl+A)">All</button>
+    <button id="none" title="unpick everything (Esc)">None</button>
+    <button id="invert" title="pick what is not picked">Invert</button>
+    <button id="reset" title="put the picked cells (or every cell) back on the grid">Unmove</button>
+    <span class="sep"></span>
     <span class="chip"><span class="swatch" style="background:var(--pick)"></span>picked <b id="nPick">0</b></span>
-    <span class="chip"><span class="swatch" style="background:var(--cut)"></span>already cut <b id="nCut">0</b></span>
-    <span class="chip">moved <b id="nMoved">0</b></span>
-    <button class="go" id="apply">Apply</button>
+    <span class="chip"><span class="swatch" style="background:var(--cut)"></span>cut <b id="nCut">0</b></span>
+    <span class="chip"><span class="swatch" style="background:var(--moved)"></span>moved <b id="nMoved">0</b></span>
+    <span class="chip" id="saved" title="the picks and the moves are saved to layout.json as you go"></span>
+    <span class="sep"></span>
+    <button id="delete" class="danger" title="delete the tiles of the picked blue cells (Del)">Delete</button>
+    <select id="format" title="tile format"><option value="png">png</option><option value="jpg">jpg</option></select>
+    <button class="go" id="apply" title="cut the picked cells">Apply</button>
+    <button id="fullscreen" title="full screen">&#x26f6;</button>
   </div>
   <div id="stage">
-    <canvas id="cv"></canvas>
-    <div id="hint"></div>
+    <div id="osd"></div>
+    <canvas id="grid"></canvas>
+    <div id="empty"></div>
+    <div id="hint" hidden></div>
     <div id="toast"></div>
+    <div id="confirm" hidden>
+      <div id="confirmText"></div>
+      <div class="row"><button id="confirmNo">Cancel</button><button id="confirmYes" class="yes">Delete</button></div>
+    </div>
   </div>
 </div>
 
+<script src="vendor/openseadragon.min.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const cv = $("cv"), ctx = cv.getContext("2d");
+const grid = $("grid"), ctx = grid.getContext("2d");
 
-// screen = source * view.s + view.t   (all view maths is in CSS pixels)
+// screen = image * V.s + V.t (CSS px), read back from the viewer on every frame
 const V = { s: 1, tx: 0, ty: 0 };
 const S = {
-  scene: null,          // {name, width, height, tile, cols, rows, cut, layout, out_dir}
-  preview: null,        // Image of the whole scene, downscaled
-  previewScale: 1,      // preview px per source px
+  scene: null,          // {name, width, height, version, view_tile, tile, cols, rows, cut, layout, out_dir}
   pick: new Set(),      // "r,c" the user wants cut
   cut: new Map(),       // "r,c" -> {x,y} already on disk, where it was cut from
-  off: new Map(),       // "r,c" -> {dx,dy} how far this cell was nudged off its slot
-  detail: new Map(),    // "x,y" -> {size, img} full-resolution crops
-  asked: new Set(),     // "x,y@size" already requested
-  hover: null,
-  marquee: null,        // {x0,y0,x1,y1} in screen px
+  off: new Map(),       // "r,c" -> {dx,dy} how far this cell was moved off its slot
+  hover: null,          // the cell under the pointer
+  grip: false,          // ...and whether the pointer is on its move handle
+  marquee: null,        // {x0,y0,x1,y1,remove} in screen px
   busy: false,
+  crisp: null,          // image smoothing off (true) past 1:1
 };
-const PREVIEW_MAX = 4096;
 const key = (r, c) => r + "," + c;
+const GRIP = 22, GRIP_PAD = 6;  // the move handle in a cell's top-left corner, in screen px
+const GRIP_MIN = 72;            // a cell smaller than this on screen shows no handle
 
-// Where a cell actually sits: its grid slot plus whatever it was nudged by.
+const viewer = OpenSeadragon({
+  element: $("osd"),
+  drawer: "canvas",              // smoothing can be switched per frame, see syncSmoothing()
+  showNavigationControl: false,  // the toolbar has Fit / 1:1, and the wheel zooms
+  showNavigator: true,
+  navigatorPosition: "BOTTOM_RIGHT",
+  navigatorSizeRatio: 0.16,
+  navigatorAutoFade: false,
+  navigatorBackground: "#000",
+  navigatorBorderColor: "#3a414d",
+  navigatorDisplayRegionColor: "#ffb020",
+  gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: false, flickEnabled: true },
+  gestureSettingsTouch: { clickToZoom: false, dblClickToZoom: false, flickEnabled: true, pinchToZoom: true },
+  gestureSettingsPen: { clickToZoom: false, dblClickToZoom: false },
+  maxZoomPixelRatio: 6,          // well past 1:1: a 5 px boat is worth looking at up close
+  minZoomImageRatio: 0.5,
+  visibilityRatio: 0.2,
+  zoomPerScroll: 1.25,
+  animationTime: 0.35,
+  imageLoaderLimit: 6,
+  timeout: 60000,
+});
+// Above the image, below the navigator: the grid belongs to the picture.
+viewer.canvas.appendChild(grid);
+
+// ------------------------------------------------------------------ geometry
+function syncView() {
+  if (!S.scene || !viewer.world.getItemCount()) return false;
+  const vp = viewer.viewport;
+  const p0 = vp.imageToViewerElementCoordinates(new OpenSeadragon.Point(0, 0));
+  const p1 = vp.imageToViewerElementCoordinates(new OpenSeadragon.Point(S.scene.width, 0));
+  V.s = (p1.x - p0.x) / S.scene.width;
+  V.tx = p0.x;
+  V.ty = p0.y;
+  return true;
+}
+
+// Past 1:1 show the pixels themselves rather than a blur of them.
+function syncSmoothing() {
+  const crisp = V.s > 1;
+  if (crisp === S.crisp) return;
+  S.crisp = crisp;
+  viewer.drawer.setImageSmoothingEnabled(!crisp);
+  viewer.forceRedraw();
+}
+
+// Where a cell actually sits: its grid slot plus whatever it was moved by.
 // The content is always pasted top-left of the tile canvas, so a cell may hang
 // off the right or bottom edge (black padding, exactly like the tiler) but may
 // never start outside the image.
@@ -109,259 +181,223 @@ function cellPos(r, c) {
   };
 }
 
-function nudge(cells, dx, dy) {
+function nudge(keys, dx, dy) {
   const t = S.scene.tile;
-  for (const k of cells) {
+  for (const k of keys) {
     const [r, c] = k.split(",").map(Number);
     const o = S.off.get(k) || { dx: 0, dy: 0 };
     const nx = Math.max(-c * t, Math.min(o.dx + dx, S.scene.width - 1 - c * t));
     const ny = Math.max(-r * t, Math.min(o.dy + dy, S.scene.height - 1 - r * t));
     if (nx === 0 && ny === 0) S.off.delete(k); else S.off.set(k, { dx: nx, dy: ny });
   }
-  draw();
 }
 
-// --------------------------------------------------------------------- draw
-function resize() {
-  const dpr = window.devicePixelRatio || 1;
-  cv.width = Math.round(cv.clientWidth * dpr);
-  cv.height = Math.round(cv.clientHeight * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  draw();
-}
-
-// Every cell, with where it sits and where that lands on screen. Cells can be
-// nudged off their slot, so there is no lattice to walk any more -- and at 126
-// cells for the biggest scene here, walking the lot each frame costs nothing.
+// Every cell on screen, with where it sits and where that lands. Cells can be
+// moved off their slot, so there is no lattice to walk -- and at ~200 cells for
+// the biggest scene, walking the lot each frame costs nothing.
 function cells() {
   const out = [];
   if (!S.scene) return out;
-  const w = S.scene.tile * V.s;
+  const w = S.scene.tile * V.s, W = grid.clientWidth, H = grid.clientHeight;
   for (let r = 0; r < S.scene.rows; r++) {
     for (let c = 0; c < S.scene.cols; c++) {
       const p = cellPos(r, c);
       const sx = V.tx + p.x * V.s, sy = V.ty + p.y * V.s;
-      if (sx > cv.clientWidth || sy > cv.clientHeight || sx + w < 0 || sy + w < 0) continue;
+      if (sx > W || sy > H || sx + w < 0 || sy + w < 0) continue;
       out.push({ r, c, k: key(r, c), x: p.x, y: p.y, sx, sy, w });
     }
   }
   return out;
 }
 
-function wantDetail() {
-  // the preview gives this many screen px per cell; past that it is mush
-  return S.scene && S.scene.tile * V.s > S.scene.tile * S.previewScale * 1.25;
-}
-
-function requestDetail(visible) {
-  if (!wantDetail()) return;
-  const want = S.scene.tile * V.s;
-  const size = want > 768 ? 1024 : want > 384 ? 512 : 256;
-  for (const cell of visible) {
-    const at = cell.x + "," + cell.y;
-    const have = S.detail.get(at);
-    if (have && have.size >= size) continue;
-    const tag = at + "@" + size;
-    if (S.asked.has(tag)) continue;
-    S.asked.add(tag);
-    const img = new Image();
-    img.onload = () => {
-      const cur = S.detail.get(at);
-      if (!cur || cur.size < size) S.detail.set(at, { size, img });
-      draw();
-    };
-    img.onerror = () => S.asked.delete(tag);
-    img.src = `cell?name=${encodeURIComponent(S.scene.name)}&x=${cell.x}&y=${cell.y}&size=${size}`;
-  }
-}
-
-function draw() {
-  ctx.clearRect(0, 0, cv.clientWidth, cv.clientHeight);
-  if (!S.scene) return;
-  const { tile, width, height } = S.scene;
-
-  if (S.preview) {
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(S.preview, 0, 0, S.preview.width, S.preview.height,
-                  V.tx, V.ty, width * V.s, height * V.s);
-  }
-
-  const visible = cells();
-  requestDetail(visible);
-  if (wantDetail()) {
-    for (const cell of visible) {
-      const have = S.detail.get(cell.x + "," + cell.y);
-      if (have) ctx.drawImage(have.img, cell.sx, cell.sy, cell.w, cell.w);
-    }
-  }
-
-  // Every cell as its own rectangle -- which is the even grid until something
-  // is moved, and shows the break the moment it is. Zoomed in the wash drops
-  // right back: the whole point of being there is to look at the pixels.
-  const wash = wantDetail() ? .10 : .30;
-
-  // What is on disk is drawn where it was actually cut from, which is not the
-  // slot if the cell was moved first -- that is the record of how it was cut.
-  ctx.lineWidth = 1;
-  for (const cut of S.cut.values()) {
-    const sx = V.tx + cut.x * V.s, sy = V.ty + cut.y * V.s, w = tile * V.s;
-    if (sx > cv.clientWidth || sy > cv.clientHeight || sx + w < 0 || sy + w < 0) continue;
-    ctx.fillStyle = `rgba(74,157,255,${wash * .7})`;
-    ctx.fillRect(sx, sy, w, w);
-  }
-
-  for (const cell of visible) {
-    const moved = S.off.has(cell.k);
-    ctx.lineWidth = 1;
-    if (S.pick.has(cell.k)) {
-      ctx.fillStyle = `rgba(255,176,32,${wash})`;
-      ctx.fillRect(cell.sx, cell.sy, cell.w, cell.w);
-    }
-    ctx.strokeStyle = S.pick.has(cell.k) ? "rgba(255,176,32,.95)"
-      : S.cut.has(cell.k) ? "rgba(74,157,255,.75)"
-      : moved ? "rgba(120,255,190,.85)" : "rgba(255,255,255,.28)";
-    ctx.lineWidth = S.pick.has(cell.k) ? 3 : moved ? 2 : 1;
-    const inset = ctx.lineWidth / 2;
-    ctx.strokeRect(cell.sx + inset, cell.sy + inset, cell.w - ctx.lineWidth, cell.w - ctx.lineWidth);
-    if (moved && cell.w > 60) {  // where it would have been, so the move is readable
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = "rgba(120,255,190,.55)";
-      ctx.lineWidth = 1;
-      ctx.strokeRect(V.tx + cell.c * tile * V.s, V.ty + cell.r * tile * V.s, cell.w, cell.w);
-      ctx.setLineDash([]);
-    }
-  }
-  ctx.lineWidth = 1;
-
-  if (S.hover) {
-    const p = cellPos(S.hover.r, S.hover.c);
-    ctx.strokeStyle = "rgba(255,255,255,.9)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(V.tx + p.x * V.s + 1, V.ty + p.y * V.s + 1, tile * V.s - 2, tile * V.s - 2);
-    ctx.lineWidth = 1;
-  }
-
-  if (S.marquee) {
-    const m = S.marquee;
-    ctx.setLineDash([5, 4]);
-    ctx.strokeStyle = m.remove ? "#ff6b6b" : "#ffd479";
-    ctx.strokeRect(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1),
-                   Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
-    ctx.setLineDash([]);
-  }
-
-  paintHud();
-}
-
-function paintHud() {
-  $("zoomChip").textContent = Math.round(V.s * 100) + "%";
-  $("nPick").textContent = S.pick.size;
-  $("nCut").textContent = S.cut.size;
-  $("nMoved").textContent = S.off.size;
-  $("apply").disabled = S.busy || S.pick.size === 0;
-  let where = "";
-  if (S.hover) {
-    const o = S.off.get(key(S.hover.r, S.hover.c));
-    const p = cellPos(S.hover.r, S.hover.c);
-    where = `cell r${S.hover.r} c${S.hover.c} at ${p.x},${p.y}` +
-      (o ? ` <b>(moved ${o.dx >= 0 ? "+" : ""}${o.dx}, ${o.dy >= 0 ? "+" : ""}${o.dy})</b>` : "") + " · ";
-  }
-  const sharp = wantDetail() ? "full resolution" : "preview";
-  $("hint").innerHTML = `${where}<b>${S.scene.cols}×${S.scene.rows}</b> cells of ${S.scene.tile}px · ${sharp}` +
-    " · drag to sweep, alt+drag to unpick, right-drag to pan" +
-    " · <b>shift+drag or arrow keys move a cell</b>";
-}
-
-// -------------------------------------------------------------------- view
-function fit() {
-  if (!S.scene) return;
-  const pad = 24;
-  V.s = Math.min((cv.clientWidth - pad) / S.scene.width, (cv.clientHeight - pad) / S.scene.height);
-  V.tx = (cv.clientWidth - S.scene.width * V.s) / 2;
-  V.ty = (cv.clientHeight - S.scene.height * V.s) / 2;
-  draw();
-}
-
-function zoomAt(x, y, factor) {
-  if (!S.scene) return;
-  const min = Math.min(cv.clientWidth / S.scene.width, cv.clientHeight / S.scene.height) * .5;
-  const next = Math.max(min, Math.min(2, V.s * factor));
-  V.tx = x - (x - V.tx) * (next / V.s);
-  V.ty = y - (y - V.ty) * (next / V.s);
-  V.s = next;
-  draw();
-}
-
-// Hit test against the cells as drawn: once one can be moved, its slot no
-// longer tells you where it is. Later cells win, matching what is on top.
+// Hit test against the cells as drawn; later cells win, matching what is on top.
 function cellAt(x, y) {
   let found = null;
   for (const cell of cells()) {
     if (x >= cell.sx && x < cell.sx + cell.w && y >= cell.sy && y < cell.sy + cell.w) found = cell;
   }
-  return found ? { r: found.r, c: found.c } : null;
+  return found;
 }
 
-// ------------------------------------------------------------------ events
-let drag = null;
-cv.addEventListener("contextmenu", (e) => e.preventDefault());
-// Framed in the webui, the arrow keys would otherwise scroll the page around us
-// until the canvas had been clicked once.
-cv.addEventListener("mouseenter", () => window.focus());
-cv.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  if (S.scene) zoomAt(e.offsetX, e.offsetY, e.deltaY < 0 ? 1.18 : 1 / 1.18);
-}, { passive: false });
+function onGrip(cell, x, y) {
+  if (!cell || cell.w < GRIP_MIN) return false;
+  const gx = cell.sx + GRIP_PAD, gy = cell.sy + GRIP_PAD;
+  return x >= gx && x < gx + GRIP && y >= gy && y < gy + GRIP;
+}
 
-cv.addEventListener("mousedown", (e) => {
-  if (!S.scene) return;
-  if (e.button === 0 && e.shiftKey) {
-    // move the cell under the cursor, on its own -- the grid is a starting
-    // point, not where every tile has to stay
-    const cell = cellAt(e.offsetX, e.offsetY);
-    if (!cell) return;
-    const k = key(cell.r, cell.c), o = S.off.get(k) || { dx: 0, dy: 0 };
-    drag = { mode: "move", k, x0: e.offsetX, y0: e.offsetY, dx: o.dx, dy: o.dy };
-    cv.classList.add("panning");
-  } else if (e.button === 0) {
-    drag = { mode: "pick", x0: e.offsetX, y0: e.offsetY, moved: false, remove: e.altKey };
-  } else {
-    drag = { mode: "pan", x0: e.offsetX, y0: e.offsetY, tx: V.tx, ty: V.ty };
-    cv.classList.add("panning");
+// ---------------------------------------------------------------------- draw
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  grid.width = Math.round(grid.clientWidth * dpr);
+  grid.height = Math.round(grid.clientHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function drawGrip(x, y) {
+  ctx.fillStyle = "rgba(20,23,28,.85)";
+  ctx.strokeStyle = "rgba(255,255,255,.85)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(x, y, GRIP, GRIP, 4);
+  ctx.fill();
+  ctx.stroke();
+  // a four-way arrow: this corner moves the cell
+  const cx = x + GRIP / 2, cy = y + GRIP / 2, a = 7, h = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx - a, cy); ctx.lineTo(cx + a, cy);
+  ctx.moveTo(cx, cy - a); ctx.lineTo(cx, cy + a);
+  ctx.stroke();
+  ctx.fillStyle = "#fff";
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const tx = cx + dx * a, ty = cy + dy * a;
+    ctx.beginPath();
+    ctx.moveTo(tx + dx * 2, ty + dy * 2);
+    ctx.lineTo(tx - dx * h + dy * h, ty - dy * h + dx * h);
+    ctx.lineTo(tx - dx * h - dy * h, ty - dy * h - dx * h);
+    ctx.fill();
   }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, grid.clientWidth, grid.clientHeight);
+  if (!syncView()) { paintHud(); return; }
+  syncSmoothing();
+  const tile = S.scene.tile, size = tile * V.s;
+  // Zoomed in the wash all but goes: the point of being there is the pixels.
+  const wash = V.s >= 0.5 ? 0.07 : 0.22;
+  const W = grid.clientWidth, H = grid.clientHeight;
+
+  // What is on disk, drawn where it was actually cut from -- which is not the
+  // slot if the cell was moved first: that is the record of how it was cut.
+  ctx.fillStyle = `rgba(74,157,255,${wash})`;
+  for (const cut of S.cut.values()) {
+    const sx = V.tx + cut.x * V.s, sy = V.ty + cut.y * V.s;
+    if (sx > W || sy > H || sx + size < 0 || sy + size < 0) continue;
+    ctx.fillRect(sx, sy, size, size);
+  }
+
+  const visible = cells();
+  for (const cell of visible) {
+    const picked = S.pick.has(cell.k), moved = S.off.has(cell.k);
+    if (picked) {
+      ctx.fillStyle = `rgba(255,176,32,${wash + 0.05})`;
+      ctx.fillRect(cell.sx, cell.sy, cell.w, cell.w);
+    }
+    ctx.strokeStyle = picked ? "rgba(255,176,32,.95)"
+      : S.cut.has(cell.k) ? "rgba(74,157,255,.8)"
+      : moved ? "rgba(120,255,190,.85)" : "rgba(255,255,255,.28)";
+    ctx.lineWidth = picked ? 3 : moved ? 2 : 1;
+    const inset = ctx.lineWidth / 2;
+    ctx.strokeRect(cell.sx + inset, cell.sy + inset, cell.w - ctx.lineWidth, cell.w - ctx.lineWidth);
+    if (moved && cell.w > 60) {  // where it would have been, so the move is readable
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "rgba(120,255,190,.5)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(V.tx + cell.c * tile * V.s, V.ty + cell.r * tile * V.s, cell.w, cell.w);
+      ctx.setLineDash([]);
+    }
+  }
+
+  const hover = S.hover && visible.find((cell) => cell.k === S.hover.k);
+  if (hover) {
+    ctx.strokeStyle = "rgba(255,255,255,.9)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(hover.sx + 1, hover.sy + 1, hover.w - 2, hover.w - 2);
+    if (hover.w >= GRIP_MIN) drawGrip(hover.sx + GRIP_PAD, hover.sy + GRIP_PAD);
+  }
+
+  if (S.marquee) {
+    const m = S.marquee;
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = m.remove ? "#ff6b6b" : "#ffd479";
+    ctx.strokeRect(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1), Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
+    ctx.setLineDash([]);
+  }
+  paintHud();
+}
+
+const deletable = () => [...S.pick].filter((k) => S.cut.has(k));
+
+function paintHud() {
+  $("zoomChip").textContent = S.scene ? Math.round(V.s * 100) + "%" : "–";
+  $("nPick").textContent = S.pick.size;
+  $("nCut").textContent = S.cut.size;
+  $("nMoved").textContent = S.off.size;
+  const doomed = S.scene ? deletable().length : 0;
+  $("delete").textContent = doomed ? `Delete ${doomed}` : "Delete";
+  $("delete").disabled = S.busy || !doomed;
+  $("apply").textContent = S.pick.size ? `Apply ${S.pick.size}` : "Apply";
+  $("apply").disabled = S.busy || !S.scene || !S.pick.size;
+  $("empty").textContent = S.scene ? "" : $("empty").dataset.text || "";
+  $("hint").hidden = !S.scene;
+  if (!S.scene) return;
+  let where = `<b>${S.scene.cols}×${S.scene.rows}</b> cells of ${S.scene.tile}px`;
+  if (S.hover) {
+    const o = S.off.get(S.hover.k), p = cellPos(S.hover.r, S.hover.c);
+    where = `cell <b>r${S.hover.r} c${S.hover.c}</b> at ${p.x},${p.y}` +
+      (o ? ` <b>(moved ${o.dx >= 0 ? "+" : ""}${o.dx}, ${o.dy >= 0 ? "+" : ""}${o.dy})</b>` : "") +
+      (S.cut.has(S.hover.k) ? " · cut" : "");
+  }
+  $("hint").innerHTML = where +
+    '<div class="keys">drag to pan · scroll to zoom · <b>click</b> picks a cell · <b>shift+drag</b> sweeps ' +
+    "(starting on a picked cell unpicks) · drag the <b>&#x271b;</b> corner or <b>ctrl+drag</b> to move a cell · " +
+    "arrow keys nudge the picked ones (shift ×8, alt 1 px)</div>";
+}
+
+// --------------------------------------------------------------------- input
+let drag = null;       // {mode: "move" | "sweep", ...} while a drag is ours rather than a pan
+let pressMode = null;  // what the last press started, so its click can be told apart
+
+viewer.addHandler("canvas-press", (e) => {
+  drag = null;
+  pressMode = null;
+  if (!S.scene) return;
+  const { x, y } = e.position, cell = cellAt(x, y), ev = e.originalEvent || {};
+  if (cell && (onGrip(cell, x, y) || ev.ctrlKey || ev.metaKey)) {
+    const o = S.off.get(cell.k) || { dx: 0, dy: 0 };
+    drag = { mode: "move", k: cell.k, x0: x, y0: y, dx: o.dx, dy: o.dy, moved: false };
+  } else if (ev.shiftKey) {
+    drag = { mode: "sweep", x0: x, y0: y, remove: !!cell && S.pick.has(cell.k) };
+  }
+  pressMode = drag && drag.mode;
 });
 
-cv.addEventListener("mousemove", (e) => {
-  if (!S.scene) return;
-  if (!drag || drag.mode !== "move") S.hover = cellAt(e.offsetX, e.offsetY);
-  if (drag && drag.mode === "pan") {
-    V.tx = drag.tx + (e.offsetX - drag.x0);
-    V.ty = drag.ty + (e.offsetY - drag.y0);
-  } else if (drag && drag.mode === "move") {
-    const [r, c] = drag.k.split(",").map(Number);
+viewer.addHandler("canvas-drag", (e) => {
+  if (!drag) return;           // an ordinary drag pans
+  e.preventDefaultAction = true;
+  const { x, y } = e.position;
+  if (drag.mode === "move") {
     S.off.set(drag.k, { dx: drag.dx, dy: drag.dy });  // back to where the drag started
-    nudge([drag.k], Math.round((e.offsetX - drag.x0) / V.s), Math.round((e.offsetY - drag.y0) / V.s));
-    S.hover = { r, c };
-  } else if (drag && drag.mode === "pick") {
-    if (Math.abs(e.offsetX - drag.x0) > 4 || Math.abs(e.offsetY - drag.y0) > 4) drag.moved = true;
-    if (drag.moved) S.marquee = { x0: drag.x0, y0: drag.y0, x1: e.offsetX, y1: e.offsetY, remove: drag.remove };
+    nudge([drag.k], Math.round((x - drag.x0) / V.s), Math.round((y - drag.y0) / V.s));
+    drag.moved = true;
+    const [r, c] = drag.k.split(",").map(Number);
+    S.hover = { r, c, k: drag.k };
+  } else {
+    S.marquee = { x0: drag.x0, y0: drag.y0, x1: x, y1: y, remove: drag.remove };
   }
   draw();
 });
 
-window.addEventListener("mouseup", (e) => {
+viewer.addHandler("canvas-drag-end", (e) => { if (drag) e.preventDefaultAction = true; });  // no flick
+
+viewer.addHandler("canvas-release", () => {
   if (!drag) return;
-  if (drag.mode === "pick") {
-    if (drag.moved) {
-      sweep(S.marquee);
-    } else {
-      const cell = cellAt(e.offsetX, e.offsetY);
-      if (cell) toggle(cell.r, cell.c);
-    }
-  }
+  if (drag.mode === "sweep" && S.marquee) { sweep(S.marquee); changed(); }
+  if (drag.mode === "move" && drag.moved) changed();
   drag = null;
   S.marquee = null;
-  cv.classList.remove("panning");
+  draw();
+});
+
+viewer.addHandler("canvas-click", (e) => {
+  e.preventDefaultAction = true;  // a click picks; it does not zoom
+  if (!S.scene || !e.quick || pressMode === "move") return;
+  const cell = cellAt(e.position.x, e.position.y);
+  if (!cell) return;
+  S.pick.has(cell.k) ? S.pick.delete(cell.k) : S.pick.add(cell.k);
+  changed();
   draw();
 });
 
@@ -374,55 +410,114 @@ function sweep(m) {
   }
 }
 
-const toggle = (r, c) => { const k = key(r, c); S.pick.has(k) ? S.pick.delete(k) : S.pick.add(k); };
+function pointerAt(e) {
+  const box = viewer.canvas.getBoundingClientRect();
+  return { x: e.clientX - box.left, y: e.clientY - box.top };
+}
+
+viewer.canvas.addEventListener("pointermove", (e) => {
+  if (!S.scene || drag) return;
+  const { x, y } = pointerAt(e), cell = cellAt(x, y), grip = onGrip(cell, x, y);
+  if ((cell && cell.k) !== (S.hover && S.hover.k) || grip !== S.grip) {
+    S.hover = cell;
+    S.grip = grip;
+    viewer.canvas.style.cursor = grip ? "move" : "";
+    draw();
+  }
+});
+viewer.canvas.addEventListener("pointerleave", () => {
+  if (drag) return;
+  S.hover = null;
+  S.grip = false;
+  draw();
+});
+// Framed in the webui, the keys would otherwise go to the page around us
+// until the image had been clicked once.
+viewer.canvas.addEventListener("pointerenter", () => viewer.canvas.focus({ preventScroll: true }));
 
 const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
-window.addEventListener("keydown", (e) => {
-  if (!S.scene) return;
-  if (e.key === "Escape") { S.pick.clear(); draw(); }
-  if (e.key === "f") fit();
-  if (e.key === "a" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); selectAll(); }
-  const arrow = ARROWS[e.key];
+viewer.addHandler("canvas-key", (e) => {
+  const ev = e.originalEvent;
+  if (!S.scene || ev.type !== "keydown") return;
+  const own = () => { e.preventDefaultAction = true; ev.preventDefault(); };
+  const arrow = ARROWS[ev.key];
   if (arrow) {
-    // nudge the picked cells, or the one under the cursor when nothing is picked
-    const target = S.pick.size ? [...S.pick] : S.hover ? [key(S.hover.r, S.hover.c)] : [];
+    // nudge the picked cells, or the one under the pointer; with neither, pan
+    const target = S.pick.size ? [...S.pick] : S.hover ? [S.hover.k] : [];
     if (!target.length) return;
-    e.preventDefault();
-    const step = e.shiftKey ? 64 : e.altKey ? 1 : 8;
+    own();
+    const step = ev.shiftKey ? 64 : ev.altKey ? 1 : 8;
     nudge(target, arrow[0] * step, arrow[1] * step);
+    changed();
+    draw();
+  } else if (ev.key === "Escape") {
+    own();
+    if (!$("confirm").hidden) { $("confirm").hidden = true; return; }
+    S.pick.clear(); changed(); draw();
+  } else if (ev.key === "f" || ev.key === "F" || ev.key === "0") {
+    own(); fit();                       // not the viewer's flip
+  } else if (ev.key === "r" || ev.key === "R") {
+    own();                              // nor its rotation: the grid is axis-aligned
+  } else if ((ev.key === "a" || ev.key === "A") && (ev.ctrlKey || ev.metaKey)) {
+    own(); selectAll();
+  } else if (ev.key === "Delete" || ev.key === "Backspace") {
+    own(); askDelete();
   }
 });
-window.addEventListener("resize", resize);
 
+// Clicking a toolbar button takes the focus; give it back so the keys keep working.
+document.querySelector(".bar").addEventListener("click", (e) => {
+  if (e.target.closest("button")) viewer.canvas.focus({ preventScroll: true });
+});
+
+// ---------------------------------------------------------------------- view
+function fit() { if (S.scene) viewer.viewport.goHome(); }
 $("fit").onclick = fit;
-$("full").onclick = () => zoomAt(cv.clientWidth / 2, cv.clientHeight / 2, 1 / V.s);
-$("zoomIn").onclick = () => zoomAt(cv.clientWidth / 2, cv.clientHeight / 2, 1.25);
-$("zoomOut").onclick = () => zoomAt(cv.clientWidth / 2, cv.clientHeight / 2, 1 / 1.25);
-$("none").onclick = () => { S.pick.clear(); draw(); };
-$("all").onclick = () => selectAll();
+$("actual").onclick = () => {
+  if (!S.scene) return;
+  viewer.viewport.zoomTo(viewer.viewport.imageToViewportZoom(1));
+};
+$("fullscreen").onclick = () => {
+  if (document.fullscreenElement) return document.exitFullscreen();
+  $("app").requestFullscreen().catch(() => toast("full screen is not allowed here — open the picker in a new window", true));
+};
+
+viewer.addHandler("update-viewport", draw);
+viewer.addHandler("resize", resize);
+window.addEventListener("resize", resize);
+viewer.addHandler("open-failed", (e) => toast(`could not open the scene: ${e.message}`, true));
+let tileErrors = 0;
+viewer.addHandler("tile-load-failed", (e) => {
+  if (tileErrors++ === 0) toast(`a tile failed to load: ${e.message}`, true);
+});
+
+// ----------------------------------------------------------------- selection
+function selectAll() {
+  if (!S.scene) return;
+  for (let r = 0; r < S.scene.rows; r++)
+    for (let c = 0; c < S.scene.cols; c++) S.pick.add(key(r, c));
+  changed(); draw();
+}
+$("all").onclick = selectAll;
+$("none").onclick = () => { if (!S.scene) return; S.pick.clear(); changed(); draw(); };
 $("invert").onclick = () => {
   if (!S.scene) return;
   const next = new Set();
   for (let r = 0; r < S.scene.rows; r++)
     for (let c = 0; c < S.scene.cols; c++)
       if (!S.pick.has(key(r, c))) next.add(key(r, c));
-  S.pick = next; draw();
+  S.pick = next; changed(); draw();
 };
-function selectAll() {
-  if (!S.scene) return;
-  for (let r = 0; r < S.scene.rows; r++)
-    for (let c = 0; c < S.scene.cols; c++) S.pick.add(key(r, c));
-  draw();
-}
 $("reset").onclick = () => {
+  if (!S.scene) return;
   // only the picked ones when there is a selection, so one cell can go back alone
   if (S.pick.size) for (const k of S.pick) S.off.delete(k);
   else S.off.clear();
-  draw();
+  changed(); draw();
 };
-$("save").onclick = () => saveLayout(true);
 
+// ---------------------------------------------------------------- autosave
 // What the server needs to reproduce this cut: the offsets, and what is picked.
 const layoutPayload = () => ({
   cells: [...S.off].map(([k, o]) => {
@@ -432,62 +527,125 @@ const layoutPayload = () => ({
   picked: [...S.pick].map((k) => k.split(",").map(Number)),
 });
 
-async function saveLayout(loud) {
+let saveTimer = null;
+
+function setSaved(text, bad) {
+  $("saved").textContent = text;
+  $("saved").className = "chip" + (bad ? " bad" : "");
+}
+
+// Every change to the picks or the moves lands in layout.json a moment later:
+// there is no Save to forget.
+function changed() {
+  paintHud();
+  setSaved("saving…");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flushSave, 600);
+}
+
+async function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
   if (!S.scene) return;
   try {
-    const response = await fetch("api/layout", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: S.scene.name, layout: layoutPayload() }),
-    });
-    const report = await response.json();
-    if (!response.ok) throw new Error(report.error || response.statusText);
-    if (loud) toast(`saved ${report.moved} moved cell(s) and ${report.picked} picked → layout.json`);
+    await post("api/layout", { name: S.scene.name, layout: layoutPayload() });
+    setSaved("✓ saved");
   } catch (err) {
-    toast(String(err.message || err), true);
+    setSaved("⚠ not saved", true);
+    toast(`layout.json not saved: ${err.message || err}`, true);
   }
 }
+
+window.addEventListener("pagehide", () => {
+  if (!saveTimer || !S.scene) return;
+  const body = JSON.stringify({ name: S.scene.name, layout: layoutPayload() });
+  navigator.sendBeacon("api/layout", new Blob([body], { type: "application/json" }));
+});
 
 function toast(message, bad) {
   const el = $("toast");
   el.textContent = message;
   el.className = "on" + (bad ? " bad" : "");
   clearTimeout(el.timer);
-  el.timer = setTimeout(() => { el.className = ""; }, 3800);
+  el.timer = setTimeout(() => { el.className = ""; }, 4000);
 }
 
-// ------------------------------------------------------------------- apply
+// ------------------------------------------------------------ apply, delete
+async function post(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const report = await response.json();
+  if (!response.ok) throw new Error(report.error || response.statusText);
+  return report;
+}
+
+function takeCut(report) {
+  S.cut = new Map(report.cut.map((cell) => [key(cell.row, cell.col), cell]));
+  markCut(S.scene.name, S.cut.size);
+}
+
 $("apply").onclick = async () => {
-  if (!S.pick.size || S.busy) return;
-  S.busy = true; paintHud();
+  if (!S.scene || !S.pick.size || S.busy) return;
+  S.busy = true;
   const chosen = [...S.pick].map((k) => {
     const [row, col] = k.split(",").map(Number);
     const p = cellPos(row, col);  // where it sits now, which is what gets cut
     return { row, col, x: p.x, y: p.y };
   });
   toast(`cutting ${chosen.length} cell(s)…`);
+  S.pick.clear();
+  clearTimeout(saveTimer);  // the cut writes the layout itself
+  saveTimer = null;
+  paintHud();
   try {
-    const response = await fetch("api/apply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: S.scene.name,
-        cells: chosen,
-        format: $("format").value,
-        layout: layoutPayload(),
-      }),
+    const report = await post("api/apply", {
+      name: S.scene.name, cells: chosen, format: $("format").value, layout: layoutPayload(),
     });
-    const report = await response.json();
-    if (!response.ok) throw new Error(report.error || response.statusText);
-    S.cut = new Map(report.cut.map((cell) => [key(cell.row, cell.col), cell]));
-    S.pick.clear();
-    markCut(S.scene.name, S.cut.size);
+    takeCut(report);
+    setSaved("✓ saved");
     toast(`wrote ${report.written} tile(s) → ${report.out_dir} (${report.total} in total)`);
+  } catch (err) {
+    for (const cell of chosen) S.pick.add(key(cell.row, cell.col));  // nothing was cut: keep them picked
+    toast(String(err.message || err), true);
+  }
+  S.busy = false;
+  draw();
+};
+
+function askDelete() {
+  const doomed = deletable();
+  if (!doomed.length || S.busy) return;
+  $("confirmText").innerHTML = `Delete the <b>${doomed.length}</b> picked tile(s) already cut from this scene, ` +
+    `in <code>${escapeHtml(S.scene.out_dir)}</code>?<br>A tile already imported into Label Studio loses its image.`;
+  $("toast").className = "";  // same spot; the question wins
+  $("confirm").hidden = false;
+  $("confirmYes").focus();
+}
+$("delete").onclick = askDelete;
+$("confirmNo").onclick = () => { $("confirm").hidden = true; viewer.canvas.focus({ preventScroll: true }); };
+$("confirmYes").onclick = async () => {
+  $("confirm").hidden = true;
+  const doomed = deletable();
+  if (!doomed.length) return;
+  S.busy = true; paintHud();
+  try {
+    const report = await post("api/delete", {
+      name: S.scene.name,
+      cells: doomed.map((k) => { const [row, col] = k.split(",").map(Number); return { row, col }; }),
+    });
+    takeCut(report);
+    for (const k of doomed) S.pick.delete(k);
+    changed();
+    toast(`deleted ${report.removed} tile(s) (${report.total} left)`);
   } catch (err) {
     toast(String(err.message || err), true);
   }
   S.busy = false;
   draw();
+  viewer.canvas.focus({ preventScroll: true });
 };
 
 // ------------------------------------------------------------------- scenes
@@ -496,29 +654,50 @@ const remembered = () => { try { return localStorage.getItem(LAST_SCENE); } catc
 const remember = (name) => { try { localStorage.setItem(LAST_SCENE, name); } catch { /* private window */ } };
 const escapeHtml = (text) => text.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
 
+function setEmpty(text) {
+  $("empty").dataset.text = text;
+  paintHud();
+}
+
 async function openScene(name) {
-  S.detail.clear(); S.asked.clear(); S.pick.clear(); S.off.clear();
-  S.preview = null; S.hover = null;
-  $("hint").textContent = "loading " + name + " …";
+  if (saveTimer) await flushSave();  // the scene being left keeps its last change
+  S.scene = null; S.hover = null; S.marquee = null; S.crisp = null;
+  S.pick.clear(); S.off.clear(); S.cut.clear();
+  viewer.close();
+  draw();
+  setEmpty("loading " + name + " …");
+  setSaved("");
   const info = await (await fetch("api/scene?name=" + encodeURIComponent(name))).json();
-  if (info.error) { toast(info.error, true); return; }
-  S.scene = info;
+  if (info.error) { setEmpty(""); toast(info.error, true); return; }
   remember(name);
-  S.cut = new Map(info.cut.map((cell) => [key(cell.row, cell.col), cell]));
+  const cut = new Map(info.cut.map((cell) => [key(cell.row, cell.col), cell]));
+  const off = new Map(), pick = new Set();
   // pick up where the last session left off: the moves it made, and its selection
   for (const cell of (info.layout && info.layout.cells) || [])
-    S.off.set(key(cell.row, cell.col), { dx: cell.dx || 0, dy: cell.dy || 0 });
-  for (const [r, c] of (info.layout && info.layout.picked) || []) S.pick.add(key(r, c));
-  if (S.off.size || S.pick.size)
-    toast(`layout.json: ${S.off.size} moved cell(s), ${S.pick.size} still picked`);
-  const preview = new Image();
-  preview.onload = () => {
-    S.preview = preview;
-    S.previewScale = preview.width / info.width;
-    fit();
-  };
-  preview.src = `preview?name=${encodeURIComponent(name)}&max=${PREVIEW_MAX}`;
-  fit();
+    off.set(key(cell.row, cell.col), { dx: cell.dx || 0, dy: cell.dy || 0 });
+  for (const [r, c] of (info.layout && info.layout.picked) || []) pick.add(key(r, c));
+
+  // Deep-zoom levels from the server: the top one is the original, each below
+  // it half the size, down to about 256 px on the long side.
+  const encoded = encodeURIComponent(name);
+  const longest = Math.max(info.width, info.height);
+  const top = Math.ceil(Math.log2(longest));
+  tileErrors = 0;
+  viewer.addOnceHandler("open", () => {
+    Object.assign(S, { scene: info, cut, off, pick });
+    viewer.canvas.appendChild(grid);  // keep the grid the last thing in the canvas
+    resize();
+    if (off.size || pick.size) toast(`layout.json: ${off.size} moved cell(s), ${pick.size} still picked`);
+  });
+  viewer.open({
+    width: info.width,
+    height: info.height,
+    tileSize: info.view_tile,
+    tileOverlap: 0,
+    minLevel: Math.max(0, top - Math.floor(Math.log2(longest / 256))),
+    maxLevel: top,
+    getTileUrl: (level, x, y) => `tile?name=${encoded}&level=${level}&x=${x}&y=${y}&v=${info.version}`,
+  });
 }
 
 // One entry per scene, grouped by the folder it sits in -- which is also where
@@ -542,12 +721,12 @@ async function loadScenes() {
     `<option value="${escapeHtml(scene.name)}" data-stem="${escapeHtml(scene.stem)}" ` +
     `title="${escapeHtml(scene.name)}">${escapeHtml(sceneLabel(scene))}</option>`;
   const select = $("scene");
-  const current = S.scene ? S.scene.name : "";
+  const current = S.scene ? S.scene.name : select.value;
   select.innerHTML = `<option value="" disabled>— pick a scene —</option>` +
     [...groups].map(([folder, scenes]) =>
       `<optgroup label="${escapeHtml(folder || list.root.split("/").pop())}/">${scenes.map(option).join("")}</optgroup>`
     ).join("");
-  select.value = current;
+  select.value = current || "";
   return list.scenes;
 }
 
@@ -569,7 +748,7 @@ $("rescan").onclick = async () => {
     openScene(last);
   } else {
     select.value = "";
-    $("hint").textContent = scenes.length ? "pick a scene from the list above" : "no images found";
+    setEmpty(scenes.length ? "pick a scene from the list above" : "no images found");
   }
 })();
 </script>

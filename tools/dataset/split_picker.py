@@ -5,25 +5,30 @@ shown as one preview is 40x too small to judge, and the grid drawn over it is a
 mesh of 30 px squares -- you cannot see what you are selecting. So this is not a
 form: it is a small web app that serves the scene the way a map is served.
 
-  * the whole scene as one downscaled preview to fly over (cached on disk), and
-  * any single cell, cropped from the original at full resolution, on demand --
-    so zooming past the preview's resolution shows real pixels, not mush.
+The page is an OpenSeadragon deep-zoom viewer (``vendor/``, BSD licence) with
+the grid drawn over it. Its tiles come from :func:`tile_jpeg`: 512 px squares
+cut from the decoded scene, or from a halved copy of it for the zoomed-out
+levels -- built on first use and dropped with the scene -- so there is no
+pyramid on disk and zooming in shows the original pixels.
 
-Click a cell to take it, drag to sweep a block of them, Apply cuts exactly those
-and nothing else. The output is the same as ``tile_satellite.py`` produces --
+Drag to pan, scroll to zoom, click a cell to take it, shift+drag to sweep a
+block of them, Apply cuts exactly those and nothing else. The output is the same as ``tile_satellite.py`` produces --
 ``split_images/<stem>/`` next to the scene, holding ``<stem>_r000_c000.png``
 tiles and a ``tiles.json`` manifest -- so everything downstream (inference, the
 annotation import) reads it without knowing a human chose the cells.
 
-The even grid is only where a cell starts. Shift-drag one (or nudge it with the
-arrow keys) and it moves off its slot to sit over the harbour rather than across
-it; it keeps its ``r002_c003`` name and the manifest records where it actually
-came from, which is all anything downstream ever reads. Those offsets are saved
-in ``layout.json`` beside the tiles -- written on every Apply and by the Save
-button -- so reopening the scene shows how it was cut and lets you carry on.
+The even grid is only where a cell starts. Drag one by its handle (or ctrl+drag
+it, or nudge it with the arrow keys) and it moves off its slot to sit over the
+harbour rather than across it; it keeps its ``r002_c003`` name and the manifest
+records where it actually came from, which is all anything downstream ever
+reads. Those offsets and the selection are saved in ``layout.json`` beside the
+tiles as you go, so reopening the scene shows how it was cut and lets you carry
+on.
 
-Cells already on disk from an earlier cut are shown in blue: Apply adds to them,
-never deletes, and the manifest is rewritten as the union.
+Cells already on disk from an earlier cut are shown in blue. Apply adds to them
+(re-cutting a picked one where it now sits), and the manifest is rewritten as
+the union; Delete removes the tiles of the picked blue cells, and their entries
+with them.
 
 The routes are one FastAPI app (:func:`make_app`). The webui mounts it at
 ``/picker/`` inside its own server, so the Manual split tab has no Start and no
@@ -45,8 +50,8 @@ import sys
 import threading
 from pathlib import Path
 
-from fastapi import Body, FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import Body, FastAPI
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from PIL import Image
 
 
@@ -58,11 +63,13 @@ import tile_satellite  # noqa: E402  (same folder; the cut has to match it exact
 
 IMAGE_SUFFIXES = tile_satellite.IMAGE_SUFFIXES
 SPLIT_DIRNAME = tile_satellite.SPLIT_DIRNAME
-CACHE_DIRNAME = ".split_picker"  # previews live here, next to the imagery
+CACHE_DIRNAME = ".split_picker"  # where earlier versions cached previews; still never a source
 TILE_NAME_RE = re.compile(r"_r(\d{3})_c(\d{3})\.[a-z]+$", re.IGNORECASE)
+VIEW_TILE = 512  # the viewer's tiles, not the cells: what one request fetches
 
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / "split_picker.html"
+VIEWER_JS = HERE / "vendor" / "openseadragon.min.js"
 
 
 # --------------------------------------------------------------------------- #
@@ -72,7 +79,8 @@ class Library:
     """The images that can be cut, and a one-scene cache of decoded pixels.
 
     Decoding a 122 MP PNG costs seconds and ~370 MB, so exactly one stays
-    resident: the scene being looked at. Switching drops the previous one.
+    resident: the scene being looked at, plus the halved copies the zoomed-out
+    view is drawn from (a third as much again). Switching drops the lot.
 
     A scene is named by its path under the root (``processed/<scene>.png``), and
     its tiles go to ``split_images/<stem>/`` in the scene's own folder -- unless
@@ -85,7 +93,7 @@ class Library:
         self.out_root = Path(out_root).resolve() if out_root else None
         self.lock = threading.Lock()
         self.open_name = None
-        self.open_image = None
+        self.levels = {}  # shrink factor -> the open scene at that size; 1 is the original
 
     def sources(self):
         """Every image under the root, our own output folders left out."""
@@ -119,23 +127,26 @@ class Library:
 
     def image(self, name):
         """The decoded scene, loading it (and dropping the last one) if needed."""
+        return self.level(name, 1)
+
+    def level(self, name, factor):
+        """The scene shrunk ``factor`` times (a power of two), halving the nearest one built."""
         with self.lock:
             if self.open_name != name:
-                self.open_image = None  # free before allocating the next one
-                self.open_image = Image.open(self.path_of(name)).convert("RGB")
+                self.levels = {}  # free before allocating the next one
+                self.levels[1] = Image.open(self.path_of(name)).convert("RGB")
                 self.open_name = name
-            return self.open_image
+            built = max(f for f in self.levels if f <= factor)
+            while built < factor:
+                self.levels[built * 2] = self.levels[built].reduce(2)  # box filter, rounds up
+                built *= 2
+            return self.levels[factor]
 
     def out_dir(self, name):
         stem = Path(name).stem
         if self.out_root is not None:
             return long_path(self.out_root / stem)
         return long_path((self.root / name).parent / SPLIT_DIRNAME / stem)
-
-    def cache_dir(self, name):
-        path = self.path_of(name).parent / CACHE_DIRNAME
-        path.mkdir(exist_ok=True)
-        return path
 
 
 def generated(dirname):
@@ -249,24 +260,30 @@ def write_layout(library, name, layout):
 
 
 # --------------------------------------------------------------------------- #
-# Preview and cell rendering.
+# What the viewer draws: the scene as deep-zoom tiles.
 # --------------------------------------------------------------------------- #
-def preview_jpeg(library, name, max_side):
-    """The whole scene as one JPEG, at most ``max_side`` on its longest edge.
+def max_level(width, height):
+    """OpenSeadragon's top level: ``ceil(log2(longest side))``, where 1 image px is 1 tile px."""
+    return (max(width, height) - 1).bit_length()
 
-    Cached beside the imagery: re-opening a scene should be instant, and the
-    decode is the expensive part of the whole app.
+
+def tile_jpeg(library, name, level, x, y):
+    """Viewer tile ``(x, y)`` of ``level``, cut from the scene shrunk to that level's scale.
+
+    Level ``max_level`` is the original; each one below halves it, so the view
+    at any zoom costs one crop and one JPEG encode rather than a resize.
     """
-    path = library.path_of(name)
-    cache = library.cache_dir(name) / f"{path.stem}_p{max_side}.jpg"
-    if cache.is_file() and cache.stat().st_mtime >= path.stat().st_mtime:
-        return cache.read_bytes()
-
-    image = library.image(name).copy()
-    image.thumbnail((max_side, max_side), Image.LANCZOS, reducing_gap=3.0)
+    image = library.image(name)
+    top = max_level(image.width, image.height)
+    if not 0 <= level <= top:
+        raise KeyError(f"level {level} (the scene has 0..{top})")
+    shrunk = library.level(name, 2 ** (top - level))
+    left, upper = x * VIEW_TILE, y * VIEW_TILE
+    if not (0 <= left < shrunk.width and 0 <= upper < shrunk.height):
+        raise KeyError(f"tile {level}/{x}_{y} is outside the image")
+    crop = shrunk.crop((left, upper, min(left + VIEW_TILE, shrunk.width), min(upper + VIEW_TILE, shrunk.height)))
     buffer = io.BytesIO()
-    image.save(buffer, "JPEG", quality=85, optimize=True)
-    cache.write_bytes(buffer.getvalue())
+    crop.save(buffer, "JPEG", quality=88)
     return buffer.getvalue()
 
 
@@ -283,21 +300,6 @@ def crop_cell(image, x, y, tile):
         canvas.paste(crop, (0, 0))
         crop = canvas
     return crop, content
-
-
-def cell_jpeg(library, name, x, y, size):
-    """One cell, cropped from the original at ``(x, y)`` and scaled to ``size`` px."""
-    image = library.image(name)
-    if x >= image.width or y >= image.height or x < 0 or y < 0:
-        raise KeyError(f"cell at ({x}, {y}) is outside the image")
-
-    crop, _ = crop_cell(image, x, y, library.tile)
-    if size != library.tile:
-        crop = crop.resize((size, size), Image.LANCZOS if size < library.tile else Image.NEAREST)
-
-    buffer = io.BytesIO()
-    crop.save(buffer, "JPEG", quality=82)
-    return buffer.getvalue()
 
 
 # --------------------------------------------------------------------------- #
@@ -413,6 +415,27 @@ def merge_manifest(library, name, written):
     return live
 
 
+def delete_cells(library, name, cells):
+    """Remove the tiles of these ``[{row, col}]`` from disk, and their manifest entries.
+
+    Only files named for this scene and one of those cells go -- whatever the
+    format they were cut in -- and the manifest is rewritten from what is left.
+    """
+    stem = Path(name).stem
+    out_dir = library.out_dir(name)
+    wanted = {(int(cell["row"]), int(cell["col"])) for cell in cells}
+    removed = 0
+    if out_dir.is_dir():
+        for entry in list(out_dir.iterdir()):
+            match = TILE_NAME_RE.search(entry.name)
+            if entry.is_file() and match and entry.name.startswith(stem + "_"):
+                if (int(match.group(1)), int(match.group(2))) in wanted:
+                    entry.unlink()
+                    removed += 1
+    kept = merge_manifest(library, name, []) if out_dir.is_dir() else []
+    return {"removed": removed, "total": len(kept), "out_dir": plain(out_dir)}
+
+
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
@@ -425,6 +448,8 @@ def scene_info(library, name):
         "stem": Path(name).stem,
         "width": image.width,
         "height": image.height,
+        "version": int(library.path_of(name).stat().st_mtime),  # in the tile URLs: a new file, new tiles
+        "view_tile": VIEW_TILE,
         "tile": library.tile,
         "cols": cols,
         "rows": rows,
@@ -456,7 +481,7 @@ def guarded(route):
 def make_app(library):
     """The picker -- page, scene data and the cut -- relative to wherever it is mounted.
 
-    The page asks for ``api/scenes``, ``cell?...`` and so on without a leading
+    The page asks for ``api/scenes``, ``tile?...`` and so on without a leading
     slash, so the same app works at ``/`` on its own and at ``/picker/`` in the
     webui.
     """
@@ -465,6 +490,10 @@ def make_app(library):
     @app.get("/")
     def page():
         return HTMLResponse(PAGE.read_bytes())  # read every time: an edit lands on reload
+
+    @app.get("/vendor/openseadragon.min.js")
+    def viewer_js():
+        return FileResponse(VIEWER_JS, media_type="text/javascript", headers={"Cache-Control": "max-age=86400"})
 
     @app.get("/api/scenes")
     @guarded
@@ -476,15 +505,10 @@ def make_app(library):
     def scene(name: str):
         return scene_info(library, name)
 
-    @app.get("/preview")
+    @app.get("/tile")
     @guarded
-    def preview(name: str, max_side: int = Query(4096, alias="max")):
-        return Response(preview_jpeg(library, name, max_side), media_type="image/jpeg")
-
-    @app.get("/cell")
-    @guarded
-    def cell(name: str, x: int, y: int, size: int = 512):
-        payload = cell_jpeg(library, name, x, y, max(128, min(size, library.tile)))
+    def tile(name: str, level: int, x: int, y: int):
+        payload = tile_jpeg(library, name, level, x, y)
         return Response(payload, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
     @app.post("/api/layout")
@@ -509,6 +533,18 @@ def make_app(library):
         # result, not something to remember to press a button for
         if body.get("layout") is not None:
             write_layout(library, name, body["layout"])
+        report["cut"] = cut_cells(library.out_dir(name), library.tile)
+        return report
+
+    @app.post("/api/delete")
+    @guarded
+    def delete(body: dict = Body(...)):
+        name = body["name"]
+        cells = body.get("cells", [])
+        if not cells:
+            return JSONResponse({"error": "nothing selected"}, status_code=400)
+        report = delete_cells(library, name, cells)
+        print(f"[picker] {name}: deleted {report['removed']} tile(s) ({report['total']} left)", flush=True)
         report["cut"] = cut_cells(library.out_dir(name), library.tile)
         return report
 

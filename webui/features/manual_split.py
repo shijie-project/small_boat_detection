@@ -66,9 +66,9 @@ class ManualSplitFeature(Feature):
     slot = None  # nothing to start: the picker is part of the server
     wide = True  # the canvas wants the page, not a third of it
     description = (
-        "Scroll to zoom, right-drag to pan, click or drag to pick cells, **Apply** cuts them into "
-        "`split_images/<scene>/` beside the scene. Shift+drag or the arrow keys move a cell off the "
-        f'grid. <a href="{MOUNT}/" target="_blank">Open in a new window ↗</a>'
+        "Pick the cells worth cutting and **Apply** cuts them into `split_images/<scene>/` beside the "
+        "scene; picks and moves are saved as you go. The keys are in the corner of the picker. "
+        f'<a href="{MOUNT}/" target="_blank">Open in a new window ↗</a>'
     )
 
     def routes(self):
@@ -76,7 +76,7 @@ class ManualSplitFeature(Feature):
 
     def panel(self, options):
         gr.HTML(
-            f'<iframe id="{FRAME_ID}" src="{MOUNT}/" '
+            f'<iframe id="{FRAME_ID}" src="{MOUNT}/" allow="fullscreen" '
             'style="width:100%;height:calc(100vh - 210px);min-height:560px;'
             "border:1px solid var(--border-color-primary);"
             'border-radius:8px;background:#14171c"></iframe>',

@@ -60,9 +60,10 @@ webui/
 
 **Manual split** is the one tab that is not a form, because choosing which cells of a
 122 MP scene to cut cannot be one. `tools/dataset/split_picker.py` is a small web app of
-its own — the scene as a cached preview to fly over, plus any single cell cropped from the
-original on demand — and the tab is an iframe onto it, so the canvas never goes through
-Gradio's event loop. Its routes are one FastAPI app (`make_app`), and the webui mounts it
+its own — an OpenSeadragon deep-zoom viewer (vendored in `tools/dataset/vendor/`, BSD) with
+the cell grid drawn over it, its tiles cut on request from the decoded scene or from halved
+copies of it — and the tab is an iframe onto it, so the viewer never goes through Gradio's
+event loop. Its routes are one FastAPI app (`make_app`), and the webui mounts it
 at `/picker/` on its own server (`Feature.routes()`, collected in `app.py`'s `main()`), so
 there is nothing to start: the picker is up whenever the webui is, and
 `http://127.0.0.1:8000/picker/` opens it full-window. Every scene under
@@ -72,10 +73,16 @@ and its tiles go to `split_images/<scene>/` in that same folder. Run on its own,
 `tools/dataset/tile_satellite.py`'s own code, so the tiles and the `tiles.json` manifest are
 exactly what that script would write for the same cells.
 
-A cell can also be moved off its slot (shift+drag, or the arrow keys) so a tile sits over
-the harbour rather than across it. It keeps its `r002_c003` name, `tiles.json` records the
-position it was really cut from — which is the only thing inference reads — and the offsets
-go to `layout.json` beside the tiles, so reopening the scene shows how it was cut.
+Drag pans, the wheel (or a pinch) zooms up to 6× past 1:1, a click picks a cell and
+shift+drag sweeps a block of them; the minimap in the corner jumps around the scene. A cell
+can also be moved off its slot — drag the ✛ handle in its corner, ctrl+drag it, or nudge the
+picked ones with the arrow keys — so a tile sits over the harbour rather than across it. It
+keeps its `r002_c003` name, `tiles.json` records the position it was really cut from — which
+is the only thing inference reads — and the offsets and the picks go to `layout.json` beside
+the tiles as you work (there is no Save), so reopening the scene carries on where you left
+it. Blue cells are already cut: Apply on a picked one re-cuts it where it now sits, and
+**Delete** removes the tiles of the picked blue cells, after asking — a tile already imported
+into Label Studio would lose its image.
 
 **Inference** runs on what **Manual split** produced, so its dropdown lists tile folders
 rather than images: a `split_images/<scene>/`, or `split_images/` itself for every scene at

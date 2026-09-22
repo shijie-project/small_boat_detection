@@ -1,0 +1,31 @@
+# The batching shared by every dataset: multi-scale training around 800 px and validation batches
+# padded to a multiple of 32. The augmentations are the dataset files' (they depend on the data:
+# VisDrone is oblique drone footage, AI-TOD orthogonal aerial tiles).
+
+train_dataloader:
+  collate_fn:
+    type: BatchImageCollateFunction
+    # multi-scale training: each batch is resized to a random scale around base_size, with
+    # base_size itself repeated base_size_repeat times in the draw; off from stop_epoch on
+    base_size: 800
+    base_size_repeat: 2
+    stop_epoch: 72
+    # every drawn size is a multiple of 8 * mwas_window_size, so the stride-8 map (where MWAS runs)
+    # tiles into whole windows; keep it equal to DomeHybridEncoder.mwas_window_size
+    mwas_window_size: 10
+
+  shuffle: True
+  total_batch_size: 8
+  num_workers: 8   # a worker makes ~25 img/s; training at batch 12 consumes ~50
+  pin_memory: True   # batches land in pinned memory, so their copy to the GPU is asynchronous
+
+
+val_dataloader:
+  collate_fn:
+    type: BatchImageCollateFunction
+    pad_to_multiple: 32
+  shuffle: False
+  total_batch_size: 16
+  num_workers: 4
+  pin_memory: True
+  persistent_workers: True   # the workers outlive an evaluation: no start-up on every epoch's

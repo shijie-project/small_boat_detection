@@ -1,0 +1,64 @@
+task: detection
+
+# AI-TOD-v2, read from https://huggingface.co/datasets/shijli/aitod-v2
+# (official v2 annotations; the AI-TOD protocol trains on train + validation and reports on test)
+#
+# The tiles are 800x800 already and stay so: the resize acts on RandomIoUCrop's zoomed-in crops
+# (a 30% to 100% region scaled up to 800x800).
+# No RandomZoomOut, although the legacy Dome run trains with it. At torchvision's 4x range it takes
+# the median box from 12.6 px to 7.9 and puts 18% of the boxes under 4 px, on objects that are
+# minute to begin with. The best AI-TOD runs here trained without it (the D-FINE-S baseline at
+# 30.85, fine + dynamic query at 32.52); the one run of the same model with it (the 32.52 config
+# re-run on 2026-09-20) trailed by 2.5 AP at epoch 100 and 1.1 at epoch 134, though it also
+# differed in the encoder's upsampling, the multi-scale resize and the clean phase's first epoch,
+# so zoom-out's own share is not isolated. Mosaic and mix-up stay out.
+# Orthogonal aerial imagery: every orientation is as natural as any other, so both flips and the
+# 90-degree rotations are free data, and they stay (the legacy recipe has neither).
+
+evaluator:
+  type: AITODEvaluator
+  iou_types: ['bbox', ]
+
+num_classes: 8  # labels are the official AI-TOD-v2 ids 0..7
+
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: AITODDetection
+    split: train+validation
+    transforms:
+      type: Compose
+      ops:
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: RandomVerticalFlip}
+        - {type: RandomRotate90}  # 0, 90, 180 or 270 degrees, equally likely
+        - {type: Resize, size: [800, 800]}  # the tiles' own size; a zoomed-in crop is scaled up to it
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        # after the resize, still on the PIL image: a pixel-wise colour change commutes with the
+        # crops and the resize, and PIL does it in 30 ms on 800x800 against 70 ms on the full-size
+        # image (torchvision's tensor version takes 50 ms on the single thread a worker has)
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        # from this epoch on the listed augmentations are switched off (the flips and rotations stay)
+        name: stop_epoch
+        epoch: 72
+        ops: ['RandomPhotometricDistort', 'RandomIoUCrop']
+  shuffle: True
+  num_workers: 4
+
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: AITODDetection
+    split: test
+    transforms:
+      type: Compose
+      ops:
+        - {type: Resize, size: [800, 800]}  # the tiles' own size
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+  shuffle: False
+  num_workers: 4

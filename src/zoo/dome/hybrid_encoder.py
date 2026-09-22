@@ -1,0 +1,314 @@
+"""
+Dome-DETR: DETR with Density-Oriented Feature-Query Manipulation for Efficient Tiny Object Detection
+Copyright (c) 2025 The Dome-DETR Authors. All Rights Reserved.
+---------------------------------------------------------------------------------
+Modified from D-FINE (https://github.com/Peterande/D-FINE)
+Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
+
+D-FINE's hybrid encoder: a channel projection per backbone level, an intra-scale transformer on
+the listed (top) levels, and a CSP-ELAN feature pyramid across levels. It differs from upstream
+in upsampling to the finer level's exact size, which a four-level pyramid on arbitrary input sizes
+needs, and in upsampling bilinearly with ``align_corners=False`` by default where D-FINE uses
+nearest (``upsample``). It has one hook, ``enhance``, that runs on the projected levels before the transformer
+and may add entries to the output dict; here it does nothing, so this is the baseline to build on.
+``dome_encoder.DomeHybridEncoder`` fills the hook with Dome's DeFE and MWAS.
+"""
+
+import copy
+from collections import OrderedDict
+from math import ceil
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F  # noqa: N812
+
+from ...core import register
+from ...misc.visualizer import dump_feature_map
+from ...nn.blocks import ConvNormLayerFuse, LightFusion, RepNCSPELAN4, RepSepFusion, SCDown, SeparableConv
+from ...nn.checkpoint import checkpoint_module
+from ...nn.position_encoding import build_2d_sincos_position_embedding
+from ...nn.transformer import TransformerEncoder, TransformerEncoderLayer
+
+__all__ = ["HybridEncoder"]
+
+
+@register()
+class HybridEncoder(nn.Module):
+    """
+    Args:
+        in_channels / feat_strides: the backbone levels, lowest stride first.
+        hidden_dim: every level is projected to this width.
+        use_encoder_idx / num_encoder_layers / nhead / dim_feedforward / dropout / enc_act /
+            pe_temperature: the intra-scale transformer applied to the listed levels.
+        expansion / depth_mult / act: width, depth and activation of the pyramid's fusion blocks.
+        fine_fusion: the top-down fusion block of the finest level, where the maps are largest:
+            ``elan`` (the same ``RepNCSPELAN4`` as the other levels), ``slim`` (the ELAN block
+            with its inner width halved to ``hidden_dim``), ``light`` (``blocks.LightFusion``:
+            a 1x1 fuse, a depthwise 3x3 and a 1x1 with a residual, a third of the ELAN block's
+            FLOPs) or ``separable`` (``blocks.SeparableConv``, EfficientDet's BiFPN block as
+            published: a depthwise 3x3 and a pointwise 1x1, a fifth of the ELAN block's FLOPs).
+        use_hybrid: run the top-down / bottom-up pyramid; off, the projected levels are returned.
+        upsample / align_corners: how the top-down path (and the fine level's semantic branch)
+            upsamples to the finer level: ``bilinear`` (default) or ``nearest`` (D-FINE's,
+            ``scale_factor=2``); ``align_corners`` is read by ``bilinear`` only, False (default:
+            the maps' own geometry, exact) or True (Dome's). The AI-TOD runs of this repository up
+            to 2026-09-17 (the D-FINE-S baseline at 30.85, fine + dynamic query at 32.52) trained
+            with ``bilinear`` and ``align_corners`` True, those from then to 2026-09-22 with
+            ``nearest``. On the S AI-TOD baseline without zoom-out the two bilinear settings
+            score alike after 12 epochs (15.26 AP with False, 15.19 with True).
+        checkpoint_fusion: in training, recompute the fusion blocks' (the fine level's included)
+            activations in the backward pass instead of keeping them (the stride-4 level's are
+            most of the encoder's memory).
+        eval_spatial_size: (h, w) at evaluation, to precompute the position embeddings; unset,
+            they are built for whatever size arrives.
+        fine_in_channels / fine_dim: the fine level, a map one stride finer than the pyramid,
+            built from the backbone's stem map (``HGNetv2(return_stem=True)``, the first of
+            ``feats``, ``fine_in_channels`` wide) as one more top-down step of the pyramid at
+            ``fine_dim`` channels: the stem map through a 1x1 (the level's ``input_proj``), the
+            finest pyramid level through a 1x1 and upsampled (its ``lateral_convs``), the two
+            concatenated and fused by the pyramid's own ``RepNCSPELAN4`` with every width scaled
+            by ``fine_dim / hidden_dim``. It stays out of the pyramid and the encoder's levels:
+            the decoder reads it as values only (``DFINETransformer(fine_channels)``).
+            ``fine_in_channels`` 0 (default): no fine level.
+
+    ``forward(feats, img_inputs, targets)`` returns a dict with ``feats`` (the pyramid, one
+    tensor per level), ``img_inputs`` (the image, passed through for the decoder's dumps) and,
+    with a fine level, ``fine``, plus whatever ``enhance`` adds.
+    """
+
+    __share__ = ["eval_spatial_size"]
+
+    def __init__(
+        self,
+        in_channels=(512, 1024, 2048),
+        feat_strides=(8, 16, 32),
+        hidden_dim=256,
+        nhead=8,
+        dim_feedforward=1024,
+        dropout=0.0,
+        enc_act="gelu",
+        use_encoder_idx=(2,),
+        num_encoder_layers=1,
+        pe_temperature=10000,
+        expansion=1.0,
+        depth_mult=1.0,
+        act="silu",
+        eval_spatial_size=None,
+        use_hybrid=True,
+        upsample="bilinear",
+        align_corners=False,
+        checkpoint_fusion=False,
+        fine_fusion="elan",
+        fine_fusion_hidden=256,
+        fine_fusion_depth=2,
+        fine_in_channels=0,
+        fine_dim=64,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.use_encoder_idx = use_encoder_idx
+        self.num_encoder_layers = num_encoder_layers
+        self.pe_temperature = pe_temperature
+        self.eval_spatial_size = eval_spatial_size
+        self.pos_embeds = []
+        self.in_channels = in_channels
+        self.feat_strides = feat_strides
+        self.out_channels = [hidden_dim for _ in range(len(in_channels))]
+        self.out_strides = feat_strides
+        self.use_hybrid = use_hybrid
+        assert upsample in ("nearest", "bilinear"), upsample
+        self.upsample = upsample
+        self.align_corners = bool(align_corners)
+        self.checkpoint_fusion = checkpoint_fusion
+        assert fine_fusion in ("elan", "slim", "light", "separable", "repsep"), fine_fusion
+        self.fine_fusion = fine_fusion
+        self.dim_feedforward = dim_feedforward
+        self.fine_in_channels = fine_in_channels
+
+        # channel projection
+        self.input_proj = nn.ModuleList()
+        for in_channel in in_channels:
+            self.input_proj.append(
+                nn.Sequential(
+                    OrderedDict(
+                        [
+                            ("conv", nn.Conv2d(in_channel, hidden_dim, kernel_size=1, bias=False)),
+                            ("norm", nn.BatchNorm2d(hidden_dim)),
+                        ]
+                    )
+                )
+            )
+
+        # intra-scale transformer, one per listed level
+        if self.num_encoder_layers > 0:
+            encoder_layer = TransformerEncoderLayer(
+                hidden_dim, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, activation=enc_act
+            )
+            self.encoder = nn.ModuleList(
+                [
+                    TransformerEncoder(copy.deepcopy(encoder_layer), num_encoder_layers)
+                    for _ in range(len(use_encoder_idx))
+                ]
+            )
+
+        if self.use_hybrid:
+            fusion = dict(c3=hidden_dim * 2, c4=round(expansion * hidden_dim // 2), n=round(3 * depth_mult), act=act)
+            # top-down: lateral 1x1 on the coarser level, upsample, fuse with the finer one; the
+            # last block fuses into the finest level
+            self.lateral_convs = nn.ModuleList()
+            self.fpn_blocks = nn.ModuleList()
+            for i in range(len(in_channels) - 1):
+                self.lateral_convs.append(ConvNormLayerFuse(hidden_dim, hidden_dim, 1, 1))
+                finest = i == len(in_channels) - 2
+                if finest and fine_fusion == "light":
+                    self.fpn_blocks.append(LightFusion(hidden_dim * 2, hidden_dim, act=act))
+                elif finest and fine_fusion == "separable":
+                    self.fpn_blocks.append(SeparableConv(hidden_dim * 2, hidden_dim, act=act))
+                elif finest and fine_fusion == "repsep":
+                    self.fpn_blocks.append(
+                        RepSepFusion(
+                            hidden_dim * 2, hidden_dim, hidden=fine_fusion_hidden, depth=fine_fusion_depth, k=5, act=act
+                        )
+                    )
+                elif finest and fine_fusion == "slim":
+                    self.fpn_blocks.append(RepNCSPELAN4(hidden_dim * 2, hidden_dim, **{**fusion, "c3": hidden_dim}))
+                else:
+                    self.fpn_blocks.append(RepNCSPELAN4(hidden_dim * 2, hidden_dim, **fusion))
+            # bottom-up: downsample the finer level, fuse with the coarser one
+            self.downsample_convs = nn.ModuleList()
+            self.pan_blocks = nn.ModuleList()
+            for _ in range(len(in_channels) - 1):
+                self.downsample_convs.append(nn.Sequential(SCDown(hidden_dim, hidden_dim, 3, 2)))
+                self.pan_blocks.append(RepNCSPELAN4(hidden_dim * 2, hidden_dim, **fusion))
+
+        # the fine level: one more top-down step, the pyramid's own three modules at fine_dim
+        # channels (the maps are four times the stride-4 level's, so every width is scaled down)
+        if fine_in_channels > 0:
+            self.fine_lateral = ConvNormLayerFuse(fine_in_channels, fine_dim, 1, 1)  # the level's input_proj
+            self.fine_top_down = ConvNormLayerFuse(hidden_dim, fine_dim, 1, 1)  # its lateral conv
+            self.fine_block = RepNCSPELAN4(
+                fine_dim * 2,
+                fine_dim,
+                c3=fine_dim * 2,
+                c4=max(1, round(expansion * fine_dim // 2)),
+                n=max(1, round(3 * depth_mult)),
+                act=act,
+            )
+
+        self._build_eval_pos_embeds()
+
+    def _build_eval_pos_embeds(self):
+        """Position embeddings for the evaluation size, one per intra-scale level, computed once."""
+        if not self.eval_spatial_size:
+            return
+        for idx in self.use_encoder_idx:
+            stride = self.feat_strides[idx]
+            self.pos_embeds.append(
+                build_2d_sincos_position_embedding(
+                    ceil(self.eval_spatial_size[1] / stride),
+                    ceil(self.eval_spatial_size[0] / stride),
+                    self.hidden_dim,
+                    self.pe_temperature,
+                )
+            )
+
+    def enhance(self, proj_feats: list[torch.Tensor], img_inputs, targets) -> dict:
+        """
+        Hook on the projected levels, before the transformer and the pyramid. May modify
+        ``proj_feats`` in place and returns entries to add to the output dict. Nothing here.
+        """
+        return {}
+
+    def _pos_embed(self, w: int, h: int, device) -> torch.Tensor:
+        """The position embedding of a ``w`` x ``h`` grid on ``device``, built once per size (multi-scale training draws a handful)."""
+        cache = self.__dict__.setdefault("_pos_embed_cache", {})  # a plain attribute: not a buffer, not saved
+        key = (w, h, str(device))
+        if key not in cache:
+            if len(cache) >= 64:
+                cache.clear()
+            cache[key] = build_2d_sincos_position_embedding(w, h, self.hidden_dim, self.pe_temperature).to(device)
+        return cache[key]
+
+    def _fuse(self, block, feats):
+        """``block`` on the concatenation of ``feats``, recomputed in the backward pass under ``checkpoint_fusion``."""
+        if self.checkpoint_fusion and self.training and torch.is_grad_enabled():
+            return checkpoint_module(block, *feats, fn=lambda *f: block(torch.concat(f, dim=1)))
+        return block(torch.concat(feats, dim=1))
+
+    def _upsample(self, x: torch.Tensor, size) -> torch.Tensor:
+        """
+        ``x`` upsampled to ``size`` as ``upsample`` says. Both read the finer level's size rather
+        than a factor of 2 (the same thing whenever the levels halve, and it survives an input
+        whose sides are not a multiple of the coarsest stride). Against where each fine cell's
+        centre truly sits in the coarse map, ``nearest`` reads the coarse cell that covers it, a
+        quarter of a coarse cell off either way in alternation and no drift; ``bilinear`` with
+        ``align_corners=True`` maps the corner cells onto each other, a drift that runs from a
+        quarter of a coarse cell one way at one border to a quarter the other way at the other and
+        is zero at the centre (8 px at the stride-16 level of an 800 input, 1 px at the fine level),
+        Dome's arithmetic as published; ``bilinear`` with ``align_corners=False`` samples each fine
+        cell's centre exactly (the two border cells clamp), the only one of the three with no error.
+        """
+        if self.upsample == "bilinear":
+            return F.interpolate(x, size=size, mode="bilinear", align_corners=self.align_corners)
+        return F.interpolate(x, size=size, mode="nearest")
+
+    def _fine(self, stem: torch.Tensor, finest: torch.Tensor) -> torch.Tensor:
+        """
+        The fine level as one more top-down step: the finest pyramid level through its lateral
+        1x1 and upsampled to the stem map's size as the pyramid's top-down path is, concatenated
+        with the stem map through its 1x1 and fused by the pyramid's block. The stem branch, which
+        carries the detail, is not resampled at all.
+        """
+        semantics = self._upsample(self.fine_top_down(finest), stem.shape[2:])
+        return self._fuse(self.fine_block, [semantics, self.fine_lateral(stem)])
+
+    def forward(self, feats, img_inputs, targets=None):
+        stem = None
+        if self.fine_in_channels > 0:
+            stem, feats = feats[0], feats[1:]
+            assert stem.shape[1] == self.fine_in_channels, (stem.shape, self.fine_in_channels)
+        assert len(feats) == len(self.in_channels)
+        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
+        dump_feature_map("backbone_output_0", proj_feats[0])
+
+        out = {"img_inputs": img_inputs}
+        out.update(self.enhance(proj_feats, img_inputs, targets))
+
+        # intra-scale transformer
+        if self.num_encoder_layers > 0:
+            for i, enc_ind in enumerate(self.use_encoder_idx):
+                h, w = proj_feats[enc_ind].shape[2:]
+                src_flatten = proj_feats[enc_ind].flatten(2).permute(0, 2, 1)  # [B, HW, C]
+                if self.training or self.eval_spatial_size is None:
+                    pos_embed = self._pos_embed(w, h, src_flatten.device)
+                else:
+                    pos_embed = self.pos_embeds[i].to(src_flatten.device)
+                memory = self.encoder[i](src_flatten, pos_embed=pos_embed)
+                proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()
+
+        if not self.use_hybrid:
+            out["feats"] = proj_feats
+            if stem is not None:
+                out["fine"] = self._fine(stem, proj_feats[0])
+            return out
+
+        # top-down: coarsest level first, each finer level fused with the upsampled result
+        inner_outs = [proj_feats[-1]]
+        for i, idx in enumerate(range(len(self.in_channels) - 1, 0, -1)):
+            feat_high = self.lateral_convs[i](inner_outs[0])
+            feat_low = proj_feats[idx - 1]
+            inner_outs[0] = feat_high
+            # D-FINE upsamples with nearest, Dome with bilinear and align_corners=True (see upsample)
+            upsample_feat = self._upsample(feat_high, feat_low.shape[2:])
+            inner_outs.insert(0, self._fuse(self.fpn_blocks[i], [upsample_feat, feat_low]))
+
+        # bottom-up: finest level first, each coarser level fused with the downsampled result
+        outs = [inner_outs[0]]
+        for i in range(len(self.in_channels) - 1):
+            downsample_feat = self.downsample_convs[i](outs[-1])
+            outs.append(self._fuse(self.pan_blocks[i], [downsample_feat, inner_outs[i + 1]]))
+
+        out["feats"] = outs
+        if stem is not None:
+            out["fine"] = self._fine(stem, outs[0])
+        return out

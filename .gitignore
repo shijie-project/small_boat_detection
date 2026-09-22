@@ -1,0 +1,36 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# editors / os
+.idea/
+.vscode/
+.DS_Store
+.sync.ffs_db
+
+# experiment artifacts
+outputs/
+logs/*.log
+weight/
+*.pth
+*.onnx
+*.engine
+events.out.tfevents.*
+
+# local dumping ground for upstream files we do not use; never committed
+.legacy/
+
+# LaTeX build artifacts. Configure the editor to use latex/out/ as its
+# compilation output directory; /out/ is retained here for older profiles.
+/latex/out/
+/out/
+/latex/*.aux
+/latex/*.bbl
+/latex/*.blg
+/latex/*.log
+/latex/*.pdf
+/latex/*.synctex.gz

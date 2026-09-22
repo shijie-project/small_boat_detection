@@ -1,0 +1,38 @@
+# Runtime defaults shared by every experiment. Model configs and the command line override them.
+
+print_freq: 100
+# every run writes into its own <output_dir>/<date>_<time> (a resumed run into its checkpoint's
+# directory); `--output-dir` on the command line names the directory itself
+output_dir: './logs'
+checkpoint_freq: 12
+# stage 1 is validated from epoch eval_after on, every eval_freq epochs (counted from epoch 0),
+# and on its last epoch whatever the two say; stage 2 validates every epoch, its patience counts
+# them. The first 100 epochs go unvalidated: stage-1 AP rises monotonically (the legacy runs'
+# within 0.001), so the epochs before the end of stage 1 only draw the curve, and on AI-TOD a
+# validation costs 40% of an epoch
+eval_freq: 1
+eval_after: 100
+# stage 2 would reload the best stage-1 checkpoint after this many evaluated epochs without a new
+# best; 0 never reloads. Off: in the six legacy runs and our own it either never fired or threw
+# away 1.6 AP and a dozen epochs climbing back, and it never produced a new best (D-FINE-L AI-TOD
+# reloaded at epoch 129 and 144, dropping 34.6 to 33.0 and 34.5 to 32.9, its best staying at 123)
+patience: 0
+
+
+sync_bn: True
+find_unused_parameters: False
+
+
+# mixed precision and EMA are off here and switched on by dome/include/optimizer.yml
+use_amp: False
+scaler:
+  type: GradScaler
+  enabled: True
+
+use_ema: False
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  warmups: 1000
+# decay the EMA restarts with when stage 2 reloads the best stage-1 checkpoint
+ema_restart_decay: 0.9999

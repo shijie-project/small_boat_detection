@@ -12,7 +12,6 @@ from contextlib import nullcontext
 
 import gradio as gr
 
-from .discovery import options
 from .jobs import job
 from .paths import ROOT
 from .restart import restart
@@ -77,12 +76,6 @@ def component_of(field, opts):
         label=field.label,
         info=field.info or None,
     )
-
-
-def flatten(fields):
-    """Fields in declaration order, with the row groupings unwrapped."""
-    for entry in fields:
-        yield from entry if isinstance(entry, (list, tuple)) else [entry]
 
 
 def render_fields(fields, opts):
@@ -201,21 +194,6 @@ def make_clear(slot):
         return paint(slot)
 
     return clear
-
-
-def make_rescan(fields):
-    """Re-read configs / checkpoints without restarting the server."""
-
-    def rescan():
-        opts = options()
-        updates = [gr.update(choices=choices_of(field, opts)[0]) for field in fields]
-        gr.Info(
-            f"{len(opts['configs'])} configs · {len(opts['checkpoints'])} checkpoints"
-            f" · {len(opts['tiles'])} tile folders"
-        )
-        return updates[0] if len(updates) == 1 else updates
-
-    return rescan
 
 
 def make_restart(demo):

@@ -24,10 +24,8 @@ from webui.core.jobs import SLOT_LABELS, SLOTS
 from webui.core.paths import HOST, PORT, ROOT
 from webui.core.ui import (
     CONSOLE_CSS,
-    flatten,
     make_clear,
     make_refresh,
-    make_rescan,
     make_restart,
     make_start,
     make_stop,
@@ -57,15 +55,13 @@ def build_ui():
     opts = options()
     features = all_features()
     pending_starts = []  # wired once the console components exist
-    choice_fields = []
-    choice_components = []
     consoles = {}  # slot -> [status, log, seen]
     slots = slots_of(features)
 
     with gr.Blocks(title=TITLE, fill_width=True) as demo:
         with gr.Row(equal_height=True):
             gr.Markdown(f"### {TITLE} — train / test / annotate", scale=1)
-            rescan_button = gr.Button("↻ Rescan", variant="secondary", size="sm", scale=0, min_width=110)
+            # Rebuilds every dropdown from disk too, so it doubles as the rescan.
             # Under `gradio webui/app.py` every save already does this.
             restart_button = gr.Button(
                 "⟳ Restart webui", variant="secondary", size="sm", scale=0, min_width=150, visible=not demo.dev_mode
@@ -92,10 +88,6 @@ def build_ui():
                                 pending_starts.append(
                                     (button, stop_button, feature, names, [inputs[n] for n in names])
                                 )
-                            for field in flatten(feature.fields):
-                                if field.kind in ("choice", "multichoice"):
-                                    choice_fields.append(field)
-                                    choice_components.append(inputs[field.name])
 
                 gr.Markdown(f"<sub>root: `{ROOT}`</sub>")
 
@@ -124,7 +116,6 @@ def build_ui():
             console = consoles[feature.slot]
             button.click(make_start(feature, names), inputs=components, outputs=console)
             stop_button.click(make_stop(feature, labels), outputs=console)
-        rescan_button.click(make_rescan(choice_fields), outputs=choice_components)
         # The server now serves the rebuilt page; this one is stale, so fetch it.
         restart_button.click(make_restart(demo)).success(fn=None, js="() => { location.reload(); }")
         # A wide feature takes the whole page: the console it would share the

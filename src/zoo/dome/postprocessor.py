@@ -24,8 +24,7 @@ class DomePostProcessor(nn.Module):
 
     With focal (sigmoid) scores every (query, class) pair is a candidate and the top
     ``num_top_queries`` of them are kept, so a query can yield more than one detection; with
-    softmax scores each query keeps its best class. The number of queries Q varies per image
-    under PAQI, and the cap never exceeds it.
+    softmax scores each query keeps its best class. The cap never exceeds the number of queries Q.
 
     ``clamp_boxes`` cuts every box to the image (a box past the border cannot be matched to the
     ground truth it overhangs; the probes measured +0.3 AP on VisDrone). ``nms_iou`` above 0 runs

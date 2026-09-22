@@ -12,13 +12,5 @@ HybridEncoder:
   depth_mult: 1
   expansion: 1
 
-DomeHybridEncoder:
-  in_channels: [128, 512, 1024, 2048]
-  depth_mult: 1
-  expansion: 1
-
 DFINETransformer:
-  num_layers: 6
-
-DomeTransformer:
   num_layers: 6

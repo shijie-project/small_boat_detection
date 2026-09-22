@@ -7,8 +7,7 @@ Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
 
 The D-FINE decoder: a deformable-attention decoder stack with Fine-grained Distribution
 Refinement, fed by the ``num_queries`` best encoder tokens. Query initialization is the one
-method a subclass overrides (``_get_decoder_input``); ``dome_decoder.DomeTransformer`` replaces
-it with Dome's density-adaptive PAQI. The query count may differ per image: the initial queries
+method a subclass can override (``_get_decoder_input``). The query count may differ per image: the initial queries
 are padded to the largest count and ``batch_queries_num`` tells the criterion and the denoising
 mask how many are real.
 """

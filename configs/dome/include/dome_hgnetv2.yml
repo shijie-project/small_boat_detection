@@ -1,10 +1,9 @@
-# Dome-DETR on an HGNetv2 backbone: the architecture shared by every Dome-{S,M,L} config and
-# the D-FINE baselines. The model configs set what depends on the backbone size (HGNetv2 name,
-# encoder in_channels, depth_mult / expansion, decoder num_layers), the dataset (DeFE query
-# budget), and, deliberately, which encoder and decoder DOME is built from:
+# D-FINE on an HGNetv2 backbone: the architecture shared by the DFine-{S,M,L} configs. The scale
+# files set what depends on the backbone size (HGNetv2 name, encoder in_channels, depth_mult /
+# expansion, decoder num_layers), and the model configs the queries and which encoder and decoder
+# DOME is built from:
 #
-#   DOME: {encoder: DomeHybridEncoder, decoder: DomeTransformer}   # Dome-DETR
-#   DOME: {encoder: HybridEncoder,     decoder: DFINETransformer}  # D-FINE baseline
+#   DOME: {encoder: HybridEncoder, decoder: DFINETransformer}
 #
 # There is no default here: a config that does not say fails at model construction.
 
@@ -26,9 +25,7 @@ HGNetv2:
   local_model_dir: weight/hgnetv2/
 
 # four feature levels, strides 4 to 32: the stride-4 level is what makes tiny objects reachable.
-# HybridEncoder is the D-FINE baseline encoder; DomeHybridEncoder merges its settings (the yaml
-# anchor) and adds DeFE / MWAS. A model config picks one with `DOME: {encoder: ...}`.
-HybridEncoder: &hybrid_encoder
+HybridEncoder:
   feat_strides: [4, 8, 16, 32]
   hidden_dim: 256
 
@@ -44,16 +41,8 @@ HybridEncoder: &hybrid_encoder
   use_hybrid: True
   act: 'silu'
 
-# DeFE (density-focused encoder) with MWAS (masked window attention), the Dome additions
-DomeHybridEncoder:
-  <<: *hybrid_encoder
-  defe_type: 'light'
-  use_mwas: True
-  mwas_window_size: 10
-
-# DFINETransformer is the D-FINE decoder (fixed top-k queries); DomeTransformer merges its settings
-# and replaces the query selection with PAQI. A model config picks one with `DOME: {decoder: ...}`.
-DFINETransformer: &dfine_transformer
+# the D-FINE decoder: a fixed top-k of the encoder tokens as queries
+DFINETransformer:
   feat_channels: [256, 256, 256, 256]
   feat_strides: [4, 8, 16, 32]
   hidden_dim: 256
@@ -84,13 +73,9 @@ DomeCriterion:
   alpha: 0.75
   gamma: 2.0
   reg_max: 32
-  defe_density_map_weight: 1
 
   matcher:
     type: HungarianMatcher
     weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
     alpha: 0.25
     gamma: 2.0
-
-DomeTransformer:
-  <<: *dfine_transformer

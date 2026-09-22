@@ -9,8 +9,6 @@ Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
 import torch.nn as nn
 
 from ...core import register
-from .dome_decoder import DomeTransformer
-from .dome_encoder import DomeHybridEncoder
 
 __all__ = ["DOME"]
 
@@ -18,12 +16,8 @@ __all__ = ["DOME"]
 @register()
 class DOME(nn.Module):
     """
-    Backbone -> encoder -> decoder, wired the Dome way.
-
-    Unlike D-FINE, the encoder also receives the input image and the targets: DeFE builds its
-    density supervision from the image size and the ground-truth boxes, and hands the decoder a
-    dict (features plus ``img_inputs`` and ``defe``) rather than a plain feature list, which is
-    what lets the decoder pick a per-image query budget from the predicted density.
+    Backbone -> encoder -> decoder. The encoder also receives the input image and the targets
+    and hands the decoder a dict (``feats`` plus ``img_inputs``) rather than a plain feature list.
     """
 
     __inject__ = ["backbone", "encoder", "decoder"]
@@ -33,13 +27,7 @@ class DOME(nn.Module):
         if encoder is None or decoder is None:
             raise ValueError(
                 "DOME needs an encoder and a decoder: set `DOME: {encoder: ..., decoder: ...}` in the model "
-                "config (DomeHybridEncoder + DomeTransformer for Dome-DETR, HybridEncoder + DFINETransformer "
-                "for the D-FINE baseline)"
-            )
-        if isinstance(decoder, DomeTransformer) and not isinstance(encoder, DomeHybridEncoder):
-            raise ValueError(
-                f"DomeTransformer needs the density map of DomeHybridEncoder, got {type(encoder).__name__}; "
-                "for the D-FINE baseline use DFINETransformer"
+                "config (HybridEncoder + DFINETransformer)"
             )
         self.backbone = backbone
         self.encoder = encoder

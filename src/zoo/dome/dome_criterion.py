@@ -182,8 +182,7 @@ def _per_set_sum(values: Tensor, counts: list[int]) -> Tensor:
 @register()
 class DomeCriterion(nn.Module):
     """
-    The Dome-DETR training loss: D-FINE's set-prediction losses on every prediction set the
-    decoder returns, plus DeFE's density-map and count losses.
+    The training loss: D-FINE's set-prediction losses on every prediction set the decoder returns.
 
     The decoder output carries, besides the last layer's predictions, ``aux_outputs`` (the other
     layers), ``pre_outputs`` (the first layer's plain boxes), ``enc_aux_outputs`` (the encoder
@@ -204,8 +203,6 @@ class DomeCriterion(nn.Module):
             losses) to compute.
         alpha, gamma: the focal parameters of the VFL loss.
         reg_max: the FDR bin count of the decoder.
-        defe_density_map_weight, density_recall_penalty: the density-map loss weight, and how
-            much harder under-estimation of populated cells is penalised.
         use_uni_set: match the box and localization losses against the union of the matches of
             every prediction set (D-FINE's 'go' indices) rather than each set's own.
     """
@@ -222,8 +219,6 @@ class DomeCriterion(nn.Module):
         gamma=2.0,
         num_classes=80,
         reg_max=32,
-        defe_density_map_weight=4,
-        density_recall_penalty=0.3,
         use_uni_set=True,
     ):
         super().__init__()
@@ -234,8 +229,6 @@ class DomeCriterion(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.reg_max = reg_max
-        self.defe_density_map_weight = defe_density_map_weight
-        self.density_recall_penalty = density_recall_penalty
         self.use_uni_set = use_uni_set
         self._clear_cache()
 
@@ -370,37 +363,6 @@ class DomeCriterion(nn.Module):
         if weight is not None:
             loss = loss * weight.float()
         return loss
-
-    # ------------------------------------------------------------------ DeFE losses
-
-    def loss_defe(self, defe, targets):
-        """
-        The density-map loss (a squared error weighted up where the map under-estimates populated
-        cells) and, when the decoder is ``DomeTransformer`` (it writes its query budget into
-        ``defe``), the count regression loss: a squared error on the object count normalized to
-        that budget, doubled when the prediction falls short. With ``DFINETransformer`` there is
-        no budget to normalize to and the count head is left untrained.
-        """
-        density_map, gt_density_map = defe["defe_feature"], defe["gt_density_map"]
-        under = (density_map < gt_density_map).float()
-        penalty = 1 + self.density_recall_penalty * gt_density_map * under
-        defe_density_loss = (penalty * (density_map - gt_density_map) ** 2).mean() * self.defe_density_map_weight
-        losses = {"defe_density_loss": defe_density_loss}
-
-        if "min_num_select" in defe:
-            min_n, max_n = defe["min_num_select"], defe["max_num_select"]
-            reg_value = defe["reg_value"]
-            # NOTE: kept exactly as trained upstream. The normalized count is cast to int64, which
-            # truncates every target below max_num_select to 0, and reg_value [B, 1] broadcasts
-            # against the [B] targets to a [B, B] difference.
-            counts = [min(max(len(t["labels"]), min_n), max_n) for t in targets]
-            reg_targets = torch.tensor(
-                [(c - min_n) / (max_n - min_n) for c in counts], dtype=torch.int64, device=reg_value.device
-            )
-            diff = reg_value - reg_targets
-            penalty = torch.where(diff < 0, 2.0, 1.0)
-            losses["defe_reg_loss"] = (penalty * diff**2).mean()
-        return losses
 
     # ------------------------------------------------------------------ assembling
 
@@ -545,9 +507,6 @@ class DomeCriterion(nn.Module):
             losses.update(
                 self._stack_losses(dn_stack, padded, self.losses, dn_pairs, dn_pairs, dn_num_boxes, None, (), fdr)
             )
-
-        if "defe" in outputs:
-            losses.update(self.loss_defe(outputs["defe"], targets))
 
         # a NaN term must not take the whole step down with it: every term cleaned in one kernel,
         # the dict's entries views of the result (``det_engine`` sums them with one more)

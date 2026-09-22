@@ -187,7 +187,7 @@ def evaluate(
     header = "Test:"
 
     # the query selection over the set: the queries per image, and how often an image gets at
-    # least as many queries as it has ground truths (DeFE's budget, the objectness rule, ...)
+    # least as many queries as it has ground truths (a fixed top-k or a per-image budget)
     queries_per_image = []
     ample_images = 0
 

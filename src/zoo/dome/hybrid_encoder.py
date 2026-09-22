@@ -11,7 +11,6 @@ in upsampling to the finer level's exact size, which a four-level pyramid on arb
 needs, and in upsampling bilinearly with ``align_corners=False`` by default where D-FINE uses
 nearest (``upsample``). It has one hook, ``enhance``, that runs on the projected levels before the transformer
 and may add entries to the output dict; here it does nothing, so this is the baseline to build on.
-``dome_encoder.DomeHybridEncoder`` fills the hook with Dome's DeFE and MWAS.
 """
 
 import copy

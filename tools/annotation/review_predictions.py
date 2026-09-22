@@ -24,7 +24,7 @@ Usage
 -----
     python tools/annotation/review_predictions.py \\
         -c configs/dome/Dome-M-AEA.yml -r ../ckpts/Dome-M-AEA-best.pth \\
-        -i ../data/annotated/all --gt ../data/annotated/all.json --dry-run
+        -i ../data/images/all --gt ../data/annotations/all_coco.json --dry-run
 
     # remove the ship-pred boxes again
     python tools/annotation/review_predictions.py --undo
@@ -276,8 +276,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-c", "--config", help="model config yml")
     parser.add_argument("-r", "--resume", help="checkpoint .pth")
-    parser.add_argument("-i", "--input", default="../data/annotated/all", help="folder of images")
-    parser.add_argument("--gt", default=None, help="COCO json with the GT boxes to compare against (optional)")
+    parser.add_argument("-i", "--input", default="../data/images/all", help="folder of images")
+    parser.add_argument(
+        "--gt",
+        default="../data/annotations/all_coco.json",
+        help='COCO json with the GT boxes to compare against; --gt "" skips the comparison',
+    )
     parser.add_argument(
         "--iou", type=float, default=0.75, help="add a prediction whose best IoU with GT is below this"
     )

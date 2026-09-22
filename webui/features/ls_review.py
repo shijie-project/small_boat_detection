@@ -28,8 +28,8 @@ from .base import (
 from .inference import class_args, fraction
 
 
-DEFAULT_IMAGES = "../data/annotated/all"
-DEFAULT_GT = "../data/annotated/all.json"
+DEFAULT_IMAGES = "../data/images/all"
+DEFAULT_GT = "../data/annotations/all_coco.json"
 
 
 def image_folder(params):

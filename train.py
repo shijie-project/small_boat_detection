@@ -21,7 +21,7 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 import argparse
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from pprint import pformat
 
 from src.core import YAMLConfig, yaml_utils
@@ -41,6 +41,27 @@ if debug:
     torch.Tensor.__repr__ = custom_repr
 
 
+def use_split(cfg, split):
+    """Point the val loader at another split of the same dataset.
+
+    ``images/val`` becomes ``images/<split>`` and ``annotations/val_coco.json``
+    becomes ``annotations/<split>_coco.json`` -- whatever split the config
+    names, the one given here replaces it in both paths.
+    """
+    dataset = cfg.yaml_cfg["val_dataloader"]["dataset"]
+    folder, ann_file = PurePosixPath(dataset["img_folder"]), PurePosixPath(dataset["ann_file"])
+    current = folder.name
+    if not ann_file.name.startswith(current + "_"):
+        raise SystemExit(f"--split: cannot tell which part of {ann_file} is the split '{current}'")
+    folder = folder.with_name(split)
+    ann_file = ann_file.with_name(split + ann_file.name[len(current) :])
+    for path in (folder, ann_file):
+        if not os.path.exists(os.path.expanduser(str(path))):
+            raise SystemExit(f"--split {split}: {path} does not exist")
+    dataset["img_folder"], dataset["ann_file"] = str(folder), str(ann_file)
+    print(f"evaluating on split '{split}': {folder}, {ann_file}")
+
+
 def main(args) -> None:
     """main"""
     dist_utils.setup_distributed(args.print_rank, args.print_method, seed=args.seed)
@@ -54,9 +75,11 @@ def main(args) -> None:
     assert not all([args.tuning, args.resume]), "Only support from_scratch or resume or tuning at one time"
 
     update_dict = yaml_utils.parse_cli(args.update)
-    update_dict.update({k: v for k, v in args.__dict__.items() if k not in ["update"] and v is not None})
+    update_dict.update({k: v for k, v in args.__dict__.items() if k not in ["update", "split"] and v is not None})
 
     cfg = YAMLConfig(args.config, **update_dict)
+    if args.split:
+        use_split(cfg, args.split)
 
     split = "test" if args.test_only else "train"
     if split == "train":
@@ -104,6 +127,12 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, help="output directoy")
     parser.add_argument("--summary-dir", type=str, help="tensorboard summry")
     parser.add_argument("--test-only", action="store_true", default=False)
+    parser.add_argument(
+        "--split",
+        type=str,
+        help="evaluate on this split of the dataset (images/<split>, annotations/<split>_coco.json) "
+        "instead of the one the config names, e.g. train / val / all",
+    )
 
     # priority 1
     parser.add_argument("-u", "--update", nargs="+", help="update yaml config")

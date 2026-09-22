@@ -10,11 +10,11 @@ import torchvision
 
 from ...core import register
 
-__all__ = ["DomePostProcessor"]
+__all__ = ["DFINEPostProcessor"]
 
 
 @register()
-class DomePostProcessor(nn.Module):
+class DFINEPostProcessor(nn.Module):
     """
     Decoder outputs -> per-image detections in original-image pixels.
 

@@ -23,7 +23,7 @@ sync_bn: True
 find_unused_parameters: False
 
 
-# mixed precision and EMA are off here and switched on by dome/include/optimizer.yml
+# mixed precision and EMA are off here and switched on by dfine/include/optimizer.yml
 use_amp: False
 scaler:
   type: GradScaler

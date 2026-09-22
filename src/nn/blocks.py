@@ -8,7 +8,7 @@ Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
 Conv building blocks shared by the necks: the re-parameterisable conv-BN layers and the
 CSP / GELAN fusion blocks the hybrid encoder's feature pyramid is made of. Every block that
 folds its BatchNorm (or its parallel branches) into a single conv at inference does so in
-``convert_to_deploy``, which ``DOME.deploy`` calls on every module that has one.
+``convert_to_deploy``, which ``DFINE.deploy`` calls on every module that has one.
 """
 
 import torch

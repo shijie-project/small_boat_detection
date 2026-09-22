@@ -20,7 +20,7 @@ from ...misc.box_ops import box_cxcywh_to_xyxy, elementwise_box_iou, elementwise
 from ...solver.matcher import FlatMatches, PaddedTargets, padded_targets
 from .fdr import bbox2distance
 
-__all__ = ["DomeCriterion"]
+__all__ = ["DFINECriterion"]
 
 
 Targets = PaddedTargets  # a batch's ground truths padded to [B, M], see matcher.padded_targets
@@ -180,7 +180,7 @@ def _per_set_sum(values: Tensor, counts: list[int]) -> Tensor:
 
 
 @register()
-class DomeCriterion(nn.Module):
+class DFINECriterion(nn.Module):
     """
     The training loss: D-FINE's set-prediction losses on every prediction set the decoder returns.
 
@@ -458,7 +458,7 @@ class DomeCriterion(nn.Module):
             self.num_classes = num_classes
 
     def forward(self, outputs, targets, **kwargs):
-        assert "aux_outputs" in outputs, "DomeCriterion needs the decoder's auxiliary outputs (aux_loss: True)"
+        assert "aux_outputs" in outputs, "DFINECriterion needs the decoder's auxiliary outputs (aux_loss: True)"
         device = outputs["pred_logits"].device
         batch_queries_num = outputs.get("batch_queries_num")
         num_queries = outputs["pred_logits"].shape[1]

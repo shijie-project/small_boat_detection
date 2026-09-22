@@ -44,7 +44,7 @@ class YAMLConfig(BaseConfig):
     def _build(self, name: str, *, class_entry: bool = False, when: bool = True, **kwargs):
         """
         The component ``name``, built from the yaml on first use. ``class_entry`` means the yaml
-        value under ``name`` is a class name whose own entry holds the arguments (``model: DOME``);
+        value under ``name`` is a class name whose own entry holds the arguments (``model: DFINE``);
         otherwise ``name`` is an alias entry (``optimizer: {type: AdamW, ...}``). Nothing is built
         when the yaml has no ``name`` key or ``when`` is false.
         """

@@ -8,14 +8,14 @@ __include__: [
   '../runtime.yml',
   './include/dataloader.yml',
   './include/optimizer.yml',
-  './include/dome_hgnetv2.yml',
+  './include/dfine_hgnetv2.yml',
   './include/scale_m.yml',
   './include/recipe_160.yml',
 ]
 
 output_dir: ./outputs/dfine_m_aitod
 
-DOME:
+DFINE:
   encoder: HybridEncoder
   decoder: DFINETransformer
 

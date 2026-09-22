@@ -1,23 +1,23 @@
 # D-FINE on an HGNetv2 backbone: the architecture shared by the DFine-{S,M,L} configs. The scale
 # files set what depends on the backbone size (HGNetv2 name, encoder in_channels, depth_mult /
 # expansion, decoder num_layers), and the model configs the queries and which encoder and decoder
-# DOME is built from:
+# DFINE is built from:
 #
-#   DOME: {encoder: HybridEncoder, decoder: DFINETransformer}
+#   DFINE: {encoder: HybridEncoder, decoder: DFINETransformer}
 #
 # There is no default here: a config that does not say fails at model construction.
 
 task: detection
 
-model: DOME
-criterion: DomeCriterion
-postprocessor: DomePostProcessor
+model: DFINE
+criterion: DFINECriterion
+postprocessor: DFINEPostProcessor
 
 use_focal_loss: True
 # eval_spatial_size is left unset: validation images keep their aspect ratio, so the encoder builds
 # its position embeddings for whatever size arrives instead of caching them for one fixed size
 
-DOME:
+DFINE:
   backbone: HGNetv2
 
 HGNetv2:
@@ -67,7 +67,7 @@ DFINETransformer:
   cross_attn_method: default  # default, discrete
   query_select_method: default  # default, agnostic
 
-DomeCriterion:
+DFINECriterion:
   weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5}
   losses: ['vfl', 'boxes', 'local']
   alpha: 0.75

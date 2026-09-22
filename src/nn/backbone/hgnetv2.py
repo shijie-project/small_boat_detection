@@ -1,5 +1,5 @@
 """
-HGNetv2 (PP-HGNetV2), the backbone of the Dome-DETR models.
+HGNetv2 (PP-HGNetV2), the backbone of the D-FINE models.
 
 reference
 - https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py

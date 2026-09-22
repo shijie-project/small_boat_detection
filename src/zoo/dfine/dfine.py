@@ -10,11 +10,11 @@ import torch.nn as nn
 
 from ...core import register
 
-__all__ = ["DOME"]
+__all__ = ["DFINE"]
 
 
 @register()
-class DOME(nn.Module):
+class DFINE(nn.Module):
     """
     Backbone -> encoder -> decoder. The encoder also receives the input image and the targets
     and hands the decoder a dict (``feats`` plus ``img_inputs``) rather than a plain feature list.
@@ -26,7 +26,7 @@ class DOME(nn.Module):
         super().__init__()
         if encoder is None or decoder is None:
             raise ValueError(
-                "DOME needs an encoder and a decoder: set `DOME: {encoder: ..., decoder: ...}` in the model "
+                "DFINE needs an encoder and a decoder: set `DFINE: {encoder: ..., decoder: ...}` in the model "
                 "config (HybridEncoder + DFINETransformer)"
             )
         self.backbone = backbone

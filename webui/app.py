@@ -36,13 +36,18 @@ from webui.features import all_features
 TITLE = "Small Boat Detection"
 
 
-def make_console_visibility(feature):
-    """Tab handler: the console hides for a ``wide`` feature and comes back after."""
+CONSOLE_ID = "console-column"
 
-    def visibility():
-        return gr.update(visible=not feature.wide)
 
-    return visibility
+def console_visibility_js(feature):
+    """Tab handler: the console hides for a ``wide`` feature and comes back after.
+
+    Done in the browser rather than as a gradio update: a round trip made on a
+    click in the first second after the page loads never came back, leaving the
+    picker squeezed into a third of the page.
+    """
+    display = "none" if feature.wide else ""
+    return f"() => {{ const el = document.getElementById('{CONSOLE_ID}'); if (el) el.style.display = '{display}'; }}"
 
 
 def slots_of(features):
@@ -91,7 +96,7 @@ def build_ui():
 
                 gr.Markdown(f"<sub>root: `{ROOT}`</sub>")
 
-            with gr.Column(scale=6) as console_column:
+            with gr.Column(scale=6, elem_id=CONSOLE_ID):
                 with gr.Tabs():
                     for slot in slots:
                         with gr.Tab(SLOT_LABELS.get(slot, slot)):
@@ -121,7 +126,7 @@ def build_ui():
         # A wide feature takes the whole page: the console it would share the
         # row with is worth less than the pixels while you are working in it.
         for tab, feature in tabs:
-            tab.select(make_console_visibility(feature), outputs=console_column)
+            tab.select(fn=None, js=console_visibility_js(feature))
         for slot, console in consoles.items():
             gr.Timer(1.0).tick(
                 make_refresh(slot),

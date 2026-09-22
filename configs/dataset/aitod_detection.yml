@@ -19,13 +19,16 @@ evaluator:
   type: AITODEvaluator
   iou_types: ['bbox', ]
 
-num_classes: 8  # labels are the official AI-TOD-v2 ids 0..7
+# ship only: the images with at least one ship, with only the ship boxes (every other object is
+# background), labelled 0. Drop both `classes` lines and set num_classes: 8 for the full AI-TOD.
+num_classes: 1
 
 train_dataloader:
   type: DataLoader
   dataset:
     type: AITODDetection
     split: train+validation
+    classes: [ship]
     transforms:
       type: Compose
       ops:
@@ -55,6 +58,7 @@ val_dataloader:
   dataset:
     type: AITODDetection
     split: test
+    classes: [ship]
     transforms:
       type: Compose
       ops:

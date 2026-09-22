@@ -57,26 +57,6 @@ def list_dome_checkpoints():
     return [rel(p) for p in sorted(DOME_CKPT_DIR.glob("*.pth"))]
 
 
-def list_satellite_dirs(limit=200):
-    """What the picker can be pointed at: the whole folder first, then each one holding images.
-
-    The picker takes a folder, not an image, and lists every scene under it. The
-    purchased imagery arrives nested (``zip files/<order>/<image>.tif``), so this
-    walks the tree -- minus the folders we generate ourselves, which hold
-    hundreds of crops and are never an input.
-    """
-    if not SATELLITE_DIR.is_dir():
-        return []
-    found = [rel(SATELLITE_DIR)]
-    for root, dirs, files in os.walk(SATELLITE_DIR):
-        dirs[:] = sorted(d for d in dirs if not generated(d))
-        if root != str(SATELLITE_DIR) and any(f.lower().endswith(IMAGE_SUFFIXES) for f in files):
-            found.append(rel(root))
-        if len(found) >= limit:
-            break
-    return found
-
-
 def holds_images(path):
     """True if this folder has image files of its own."""
     try:
@@ -179,7 +159,6 @@ def options():
         "aea_configs": list_aea_configs(),
         "checkpoints": list_checkpoints(),
         "dome_checkpoints": list_dome_checkpoints(),
-        "satellite": list_satellite_dirs(),
         "tiles": list_tile_dirs(),
         "predictions": list_prediction_files(),
         "ls_exports": list_ls_exports(),

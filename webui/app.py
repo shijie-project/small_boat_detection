@@ -49,7 +49,7 @@ def make_console_visibility(feature):
 
 def slots_of(features):
     """The slots in use, in :data:`SLOTS` order; anything unlisted comes last."""
-    used = list(dict.fromkeys(feature.slot for feature in features))
+    used = list(dict.fromkeys(feature.slot for feature in features if feature.slot))
     return [s for s in SLOTS if s in used] + [s for s in used if s not in SLOTS]
 
 
@@ -84,11 +84,14 @@ def build_ui():
                                 gr.Markdown(feature.description)
                             inputs = feature.panel(opts)
                             names = list(inputs)
-                            # Every tab starts and stops its own job.
-                            with gr.Row():
-                                button = gr.Button(f"Start {feature.label}", variant="primary")
-                                stop_button = gr.Button(f"Stop {feature.label}", variant="stop")
-                            pending_starts.append((button, stop_button, feature, names, [inputs[n] for n in names]))
+                            # Every tab starts and stops its own job -- if it has one.
+                            if feature.slot:
+                                with gr.Row():
+                                    button = gr.Button(f"Start {feature.label}", variant="primary")
+                                    stop_button = gr.Button(f"Stop {feature.label}", variant="stop")
+                                pending_starts.append(
+                                    (button, stop_button, feature, names, [inputs[n] for n in names])
+                                )
                             for field in flatten(feature.fields):
                                 if field.kind in ("choice", "multichoice"):
                                     choice_fields.append(field)
@@ -142,8 +145,20 @@ def build_ui():
 demo = build_ui()
 
 
+def feature_routes():
+    """Pages the features serve themselves (the Manual split picker), on this same server."""
+    return [route for feature in all_features() for route in feature.routes()]
+
+
 def main():
-    demo.launch(server_name=HOST, server_port=PORT, css=CONSOLE_CSS, show_error=True)
+    # ahead of gradio's own routes; a tab that gains one later gets it on restart
+    demo.launch(
+        server_name=HOST,
+        server_port=PORT,
+        css=CONSOLE_CSS,
+        show_error=True,
+        app_kwargs={"routes": feature_routes()},
+    )
 
 
 if __name__ == "__main__":

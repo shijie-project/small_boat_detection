@@ -27,13 +27,11 @@ STATE_MODULE = "_webui_job_state"
 RUN_SLOT = "run"  # one at a time: they fight over the GPUs
 SERVICE_SLOT = "service"  # stays up until stopped
 DATA_SLOT = "data"  # CPU-bound data prep; no reason to wait for a GPU
-PICK_SLOT = "pick"  # the manual-split server: its own, so Label Studio can stay up
-SLOTS = (RUN_SLOT, SERVICE_SLOT, DATA_SLOT, PICK_SLOT)
+SLOTS = (RUN_SLOT, SERVICE_SLOT, DATA_SLOT)
 SLOT_LABELS = {
     RUN_SLOT: "Train / test",
     SERVICE_SLOT: "Services",
     DATA_SLOT: "Data prep",
-    PICK_SLOT: "Manual split",
 }
 
 

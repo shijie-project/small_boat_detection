@@ -1,117 +1,85 @@
-"""Manual split: ``tools/dataset/split_picker.py``, embedded in its tab.
+"""Manual split: ``tools/dataset/split_picker.py``, served by the webui itself.
 
 Everything else here is a form, because everything else *is* a form. Choosing
 which 1024 cells of a 122 MP scene to cut is not: it needs the image at real
-resolution, zoomed and panned, with the grid drawn on it. So this feature starts
-a small web app that serves the scene like a map, and the tab shows that app in
-an iframe -- the picker owns its own canvas and never goes through Gradio's
-event loop, which is what made the previous attempt unusable.
+resolution, zoomed and panned, with the grid drawn on it. So the picker is its
+own little web app -- a canvas that never goes through Gradio's event loop --
+and this tab is a window onto it.
 
-It is a server, so it stays up until Stop, and it gets its own slot: leaving the
-picker open must not block Label Studio or the data prep.
+It used to be a job: a second server on a port of its own, started from a form,
+with an iframe that showed nothing until Start had run and ↻ was clicked. Now
+the webui mounts the picker's routes at ``/picker/`` on its own server, so the
+tab has no Start, no port and no console, and the picker is there the moment the
+tab opens. Scenes are chosen inside it, grouped by folder.
 """
 
+import importlib
+import sys
+import threading
+
 import gradio as gr
+from starlette.routing import Mount
 
-from ..core.jobs import PICK_SLOT
-from ..core.paths import PICKER_SCRIPT, SATELLITE_DIR, rel, resolve
-from .base import Feature, Field, JobSpec, positive_int, python_executable, text
+from ..core.paths import PICKER_SCRIPT, ROOT, SATELLITE_DIR
+from .base import Feature
 
 
-DEFAULT_PORT = 8011
+MOUNT = "/picker"
+TILE = 1024  # the network's input size; the CLI's --tile is there for anything else
 FRAME_ID = "manual-split-frame"
 
+_lock = threading.Lock()
+_app = None
 
-def folder(params, key, kind, required=True):
-    """One of the two folder fields, kept inside the trees the UI may touch."""
-    value = text(params, key)
-    if not value:
-        if required:
-            raise ValueError(f"{kind} is required")
-        return ""
-    path = resolve(value)
-    if path is None:
-        raise ValueError(f"{kind} is outside the project: {value}")
-    if required and not path.is_dir():
-        raise ValueError(f"{kind} not found: {value}")
-    return value
+
+def picker_app():
+    """The picker's FastAPI app over the satellite folder, built on first use.
+
+    Imported late: the picker pulls in cv2 through ``tile_satellite``, and the
+    rest of the dashboard should not wait for that or fail with it.
+    """
+    global _app
+    with _lock:
+        if _app is None:
+            folder = str((ROOT / PICKER_SCRIPT).parent)
+            if folder not in sys.path:
+                sys.path.insert(0, folder)
+            import split_picker
+
+            _app = split_picker.make_app(split_picker.Library(SATELLITE_DIR, TILE))
+        return _app
+
+
+async def dispatch(scope, receive, send):
+    """Hand the request to this module's current picker.
+
+    Looked up on every request rather than bound once: ⟳ Restart webui imports
+    this module afresh, and the route registered at launch has to follow it.
+    """
+    module = importlib.import_module(__name__)
+    await module.picker_app()(scope, receive, send)
 
 
 class ManualSplitFeature(Feature):
     name = "manual-split"
     label = "Manual split"
-    slot = PICK_SLOT
+    slot = None  # nothing to start: the picker is part of the server
     wide = True  # the canvas wants the page, not a third of it
     description = (
-        "Pick the cells worth cutting on the scene itself: scroll to zoom, drag with the "
-        "right button to pan, click or sweep with the left to take cells, **Apply** cuts "
-        "exactly those. Zoom past the preview and each cell is re-fetched from the "
-        "original at full resolution, so you can see the boats you are selecting for. "
-        "The even grid is only a starting point — **shift+drag a cell, or nudge it with "
-        "the arrow keys**, and it cuts from where you put it; the offsets are saved in "
-        "`layout.json` next to the tiles (on every Apply, or with Save) and come back "
-        "when you reopen the scene. The output is `split_images/<stem>/` plus the "
-        "`tiles.json` manifest, which is what inference reads — and cells cut "
-        "earlier show up in blue, with Apply only ever adding to them."
+        "Scroll to zoom, right-drag to pan, click or drag to pick cells, **Apply** cuts them into "
+        "`split_images/<scene>/` beside the scene. Shift+drag or the arrow keys move a cell off the "
+        f'grid. <a href="{MOUNT}/" target="_blank">Open in a new window ↗</a>'
     )
-    fields = [
-        Field(
-            "input",
-            "Image folder (-i)",
-            kind="choice",
-            source="satellite",
-            value=rel(SATELLITE_DIR),
-            info="The picker lists every image under it.",
-        ),
-        Field("output", "Tile root (-o, optional)", info="Blank: <image folder>/split_images/"),
-        [
-            Field("tile", "Cell size (--tile)", value="1024"),
-            Field("port", "Port", value=str(DEFAULT_PORT), info=f"The panel below points at {DEFAULT_PORT}."),
-        ],
-    ]
+
+    def routes(self):
+        return [Mount(MOUNT, app=dispatch)]
 
     def panel(self, options):
-        """The form, then the picker itself in an iframe under it."""
-        from ..core.ui import render_fields
-
-        inputs = render_fields(self.fields, options)
         gr.HTML(
-            f'<iframe id="{FRAME_ID}" src="http://127.0.0.1:{DEFAULT_PORT}/" '
-            'style="width:100%;height:78vh;min-height:560px;'
+            f'<iframe id="{FRAME_ID}" src="{MOUNT}/" '
+            'style="width:100%;height:calc(100vh - 210px);min-height:560px;'
             "border:1px solid var(--border-color-primary);"
             'border-radius:8px;background:#14171c"></iframe>',
             padding=False,
         )
-        # The page is served by the job, so it is not there until Start has run.
-        reload_button = gr.Button("↻ Reload the picker", size="sm")
-        reload_button.click(
-            fn=None,
-            js=f"() => {{ const f = document.getElementById('{FRAME_ID}'); if (f) f.src = f.src; }}",
-        )
-        return inputs  # only the fields are wired to Start
-
-    def build(self, params):
-        source = folder(params, "input", "image folder")
-        output = folder(params, "output", "tile root", required=False)
-        tile = positive_int(params, "tile", 1024)
-        port = positive_int(params, "port", DEFAULT_PORT)
-        if port > 65535:
-            raise ValueError(f"port must be <= 65535, got {port}")
-
-        cmd = [
-            python_executable(params),
-            PICKER_SCRIPT,
-            "-i",
-            source,
-            "--tile",
-            str(tile),
-            "-p",
-            str(port),
-        ]
-        if output:
-            cmd += ["-o", output]
-
-        url = f"http://127.0.0.1:{port}/"
-        notes = [f"[webui] the picker is at {url} — hit ↻ under the panel once it is up"]
-        meta = {"feature": self.name, "url": url, "outdir": output or f"{source}/split_images", "cmd": " ".join(cmd)}
-        return JobSpec(cmd, meta=meta, notes=notes)
+        return {}

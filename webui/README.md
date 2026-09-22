@@ -22,9 +22,10 @@ under `gradio webui/app.py`, where every save already does this.
 Jobs run from the project root, one per **slot**. A slot is what a feature competes with:
 train and test share `run` and are serialised, because they both want every GPU; Label
 Studio wants none, so it sits in `service` and can stay up across any number of training
-runs; the file conversions are CPU work and get `data`, and the cell picker gets `pick`.
-All four can run at once. The console on the right has one tab per slot. Adding a slot
-is adding a name to `SLOTS` in `core/jobs.py` — the layout follows.
+runs; the file conversions are CPU work and get `data`. All three can run at once. The
+console on the right has one tab per slot. Adding a slot is adding a name to `SLOTS` in
+`core/jobs.py` — the layout follows. A feature with `slot = None` starts nothing and gets
+no Start / Stop row (Manual split).
 
 A form has one button, Start. Stop lives in the console tab instead, next to the log of
 the thing it kills: a slot runs one job at a time, so a Stop per feature was several
@@ -49,7 +50,7 @@ webui/
     ├── base.py            Feature/Field/JobSpec + the argument handling train & test share
     ├── train.py
     ├── test.py
-    ├── manual_split.py    the cell picker, served in an iframe (tools/dataset/split_picker.py)
+    ├── manual_split.py    the cell picker, mounted at /picker/ (tools/dataset/split_picker.py)
     ├── inference.py       detect on a folder of tiles (tools/inference/torch_inf_dir.py)
     ├── label_studio.py    the annotation server, same as `tools/starter.sh label-studio`
     ├── ls_import.py       predictions.json -> annotations in the LS project
@@ -58,13 +59,18 @@ webui/
 ```
 
 **Manual split** is the one tab that is not a form, because choosing which cells of a
-122 MP scene to cut cannot be one. `tools/dataset/split_picker.py` is a small server of its
-own — the scene as a cached preview to fly over, plus any single cell cropped from the
+122 MP scene to cut cannot be one. `tools/dataset/split_picker.py` is a small web app of
+its own — the scene as a cached preview to fly over, plus any single cell cropped from the
 original on demand — and the tab is an iframe onto it, so the canvas never goes through
-Gradio's event loop. It gets its own slot (`pick`), so leaving it open blocks nothing, and
-its page only exists once Start has run: the ↻ under the panel reloads the iframe. Apply
-cuts with `tools/dataset/tile_satellite.py`'s own code, so the tiles and the `tiles.json`
-manifest are exactly what that script would write for the same cells.
+Gradio's event loop. Its routes are one FastAPI app (`make_app`), and the webui mounts it
+at `/picker/` on its own server (`Feature.routes()`, collected in `app.py`'s `main()`), so
+there is nothing to start: the picker is up whenever the webui is, and
+`http://127.0.0.1:8000/picker/` opens it full-window. Every scene under
+`../data/satellite_images` is in its list, grouped by folder with how many cells are cut,
+and its tiles go to `split_images/<scene>/` in that same folder. Run on its own,
+`python tools/dataset/split_picker.py` serves the same app at the root. Apply cuts with
+`tools/dataset/tile_satellite.py`'s own code, so the tiles and the `tiles.json` manifest are
+exactly what that script would write for the same cells.
 
 A cell can also be moved off its slot (shift+drag, or the arrow keys) so a tile sits over
 the harbour rather than across it. It keeps its `r002_c003` name, `tiles.json` records the

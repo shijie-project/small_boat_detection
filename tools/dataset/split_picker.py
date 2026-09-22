@@ -11,9 +11,9 @@ form: it is a small web app that serves the scene the way a map is served.
 
 Click a cell to take it, drag to sweep a block of them, Apply cuts exactly those
 and nothing else. The output is the same as ``tile_satellite.py`` produces --
-``split_images/<stem>/`` holding ``<stem>_r000_c000.png`` tiles and a
-``tiles.json`` manifest -- so everything downstream (inference, the annotation
-import) reads it without knowing a human chose the cells.
+``split_images/<stem>/`` next to the scene, holding ``<stem>_r000_c000.png``
+tiles and a ``tiles.json`` manifest -- so everything downstream (inference, the
+annotation import) reads it without knowing a human chose the cells.
 
 The even grid is only where a cell starts. Shift-drag one (or nudge it with the
 arrow keys) and it moves off its slot to sit over the harbour rather than across
@@ -25,6 +25,10 @@ button -- so reopening the scene shows how it was cut and lets you carry on.
 Cells already on disk from an earlier cut are shown in blue: Apply adds to them,
 never deletes, and the manifest is rewritten as the union.
 
+The routes are one FastAPI app (:func:`make_app`). The webui mounts it at
+``/picker/`` inside its own server, so the Manual split tab has no Start and no
+port; run on its own, this file serves the same app at the root.
+
 Usage
 -----
     python tools/dataset/split_picker.py                 # http://127.0.0.1:8011
@@ -32,16 +36,17 @@ Usage
 """
 
 import argparse
+import functools
 import io
 import json
 import os
 import re
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
+from fastapi import Body, FastAPI, Query
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from PIL import Image
 
 
@@ -68,12 +73,16 @@ class Library:
 
     Decoding a 122 MP PNG costs seconds and ~370 MB, so exactly one stays
     resident: the scene being looked at. Switching drops the previous one.
+
+    A scene is named by its path under the root (``processed/<scene>.png``), and
+    its tiles go to ``split_images/<stem>/`` in the scene's own folder -- unless
+    ``out_root`` is given, in which case every scene cuts into that.
     """
 
     def __init__(self, root, tile, out_root=None):
         self.root = Path(root).resolve()
         self.tile = tile
-        self.out_root = Path(out_root).resolve() if out_root else self.root / SPLIT_DIRNAME
+        self.out_root = Path(out_root).resolve() if out_root else None
         self.lock = threading.Lock()
         self.open_name = None
         self.open_image = None
@@ -82,13 +91,25 @@ class Library:
         """Every image under the root, our own output folders left out."""
         found = []
         for base, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in sorted(dirs) if d not in (SPLIT_DIRNAME, CACHE_DIRNAME, "crops") and "_det" not in d]
+            dirs[:] = [d for d in sorted(dirs) if not generated(d)]
             found += [
                 str(Path(base, name).relative_to(self.root)).replace("\\", "/")
                 for name in sorted(files)
                 if name.lower().endswith(IMAGE_SUFFIXES)
             ]
         return found
+
+    def scenes(self):
+        """What the scene list shows: each image, its folder, and how many cells are cut."""
+        return [
+            {
+                "name": name,
+                "folder": os.path.dirname(name),
+                "stem": Path(name).stem,
+                "cut": count_cut(self.out_dir(name)),
+            }
+            for name in self.sources()
+        ]
 
     def path_of(self, name):
         path = (self.root / name).resolve()
@@ -106,12 +127,20 @@ class Library:
             return self.open_image
 
     def out_dir(self, name):
-        return long_path(self.out_root / Path(name).stem)
+        stem = Path(name).stem
+        if self.out_root is not None:
+            return long_path(self.out_root / stem)
+        return long_path((self.root / name).parent / SPLIT_DIRNAME / stem)
 
-    def cache_dir(self):
-        path = self.root / CACHE_DIRNAME
+    def cache_dir(self, name):
+        path = self.path_of(name).parent / CACHE_DIRNAME
         path.mkdir(exist_ok=True)
         return path
+
+
+def generated(dirname):
+    """A folder we wrote ourselves -- tiles, crops, detections, caches -- never a source."""
+    return dirname in (SPLIT_DIRNAME, CACHE_DIRNAME, "crops") or "_det" in dirname or dirname.startswith(".")
 
 
 PREFIX = "\\\\?\\"  # what Windows wants before a path longer than 260 characters
@@ -140,6 +169,13 @@ def plain(path):
 
 def grid_of(width, height, tile):
     return -(-width // tile), -(-height // tile)  # cols, rows
+
+
+def count_cut(out_dir):
+    """How many tiles a scene has on disk, without opening the scene."""
+    if not out_dir.is_dir():
+        return 0
+    return sum(1 for entry in out_dir.iterdir() if TILE_NAME_RE.search(entry.name))
 
 
 def cut_cells(out_dir, tile):
@@ -222,7 +258,7 @@ def preview_jpeg(library, name, max_side):
     decode is the expensive part of the whole app.
     """
     path = library.path_of(name)
-    cache = library.cache_dir() / f"{path.stem}_p{max_side}.jpg"
+    cache = library.cache_dir(name) / f"{path.stem}_p{max_side}.jpg"
     if cache.is_file() and cache.stat().st_mtime >= path.stat().st_mtime:
         return cache.read_bytes()
 
@@ -380,133 +416,126 @@ def merge_manifest(library, name, written):
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-class Handler(BaseHTTPRequestHandler):
-    library = None
-    protocol_version = "HTTP/1.1"
+def scene_info(library, name):
+    image = library.image(name)
+    cols, rows = grid_of(image.width, image.height, library.tile)
+    out_dir = library.out_dir(name)
+    return {
+        "name": name,
+        "stem": Path(name).stem,
+        "width": image.width,
+        "height": image.height,
+        "tile": library.tile,
+        "cols": cols,
+        "rows": rows,
+        "cut": cut_cells(out_dir, library.tile),
+        "layout": read_layout(out_dir),
+        "out_dir": plain(out_dir),
+    }
 
-    def log_message(self, fmt, *args):  # one line per request is enough
-        if not self.path.startswith(("/cell", "/preview")):
-            print(f"  {self.command} {self.path}")
 
-    # -- helpers ---------------------------------------------------------- #
-    def send_bytes(self, payload, content_type, cache=False):
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        if cache:
-            self.send_header("Cache-Control", "max-age=86400")
-        self.end_headers()
-        self.wfile.write(payload)
+def guarded(route):
+    """Errors come back as ``{"error": ...}``, which is what the page shows.
 
-    def send_json(self, payload, status=200):
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    Caught per route rather than by an app-wide handler: mounted in the webui,
+    an exception that escaped this app would end up in gradio's error handling.
+    """
 
-    def fail(self, status, message):
-        self.send_json({"error": message}, status=status)
-
-    # -- routes ----------------------------------------------------------- #
-    def do_GET(self):
-        url = urlparse(self.path)
-        query = {key: value[0] for key, value in parse_qs(url.query).items()}
+    @functools.wraps(route)
+    def wrapper(*args, **kwargs):
         try:
-            if url.path in ("/", "/index.html"):
-                return self.send_bytes(PAGE.read_bytes(), "text/html; charset=utf-8")
-            if url.path == "/api/scenes":
-                return self.send_json({"scenes": self.library.sources(), "tile": self.library.tile})
-            if url.path == "/api/scene":
-                return self.send_json(self.scene_info(query["name"]))
-            if url.path == "/preview":
-                payload = preview_jpeg(self.library, query["name"], int(query.get("max", 4096)))
-                return self.send_bytes(payload, "image/jpeg")
-            if url.path == "/cell":
-                payload = cell_jpeg(
-                    self.library,
-                    query["name"],
-                    int(query["x"]),
-                    int(query["y"]),
-                    max(128, min(int(query.get("size", 512)), self.library.tile)),
-                )
-                return self.send_bytes(payload, "image/jpeg", cache=True)
+            return route(*args, **kwargs)
         except KeyError as exc:
-            return self.fail(404, str(exc))
+            return JSONResponse({"error": f"not found: {exc}"}, status_code=404)
         except Exception as exc:  # a broken scene must not take the server down
-            return self.fail(500, f"{type(exc).__name__}: {exc}")
-        self.fail(404, f"no such path: {url.path}")
+            return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
 
-    def do_POST(self):
-        url = urlparse(self.path)
-        try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            if url.path == "/api/layout":
-                report = write_layout(self.library, body["name"], body.get("layout", {}))
-                print(f"layout: {report['moved']} moved, {report['picked']} picked -> {report['path']}")
-                return self.send_json(report)
-            if url.path == "/api/apply":
-                name = body["name"]
-                cells = body.get("cells", [])
-                if not cells:
-                    return self.fail(400, "nothing selected")
-                print(f"apply: {len(cells)} cell(s) of {name}")
-                report = write_cells(
-                    self.library, name, cells, body.get("format", "png"), int(body.get("quality", 95))
-                )
-                print(f"  wrote {report['written']} tile(s) -> {report['out_dir']} ({report['total']} in total)")
-                # the layout is saved with every cut: how a scene was cut is part
-                # of the result, not something to remember to press a button for
-                if body.get("layout") is not None:
-                    write_layout(self.library, name, body["layout"])
-                report["cut"] = cut_cells(self.library.out_dir(name), self.library.tile)
-                return self.send_json(report)
-        except Exception as exc:
-            return self.fail(500, f"{type(exc).__name__}: {exc}")
-        self.fail(404, f"no such path: {url.path}")
+    return wrapper
 
-    def scene_info(self, name):
-        image = self.library.image(name)
-        cols, rows = grid_of(image.width, image.height, self.library.tile)
-        out_dir = self.library.out_dir(name)
-        return {
-            "name": name,
-            "stem": Path(name).stem,
-            "width": image.width,
-            "height": image.height,
-            "tile": self.library.tile,
-            "cols": cols,
-            "rows": rows,
-            "cut": cut_cells(out_dir, self.library.tile),
-            "layout": read_layout(out_dir),
-            "out_dir": plain(out_dir),
-        }
+
+def make_app(library):
+    """The picker -- page, scene data and the cut -- relative to wherever it is mounted.
+
+    The page asks for ``api/scenes``, ``cell?...`` and so on without a leading
+    slash, so the same app works at ``/`` on its own and at ``/picker/`` in the
+    webui.
+    """
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.get("/")
+    def page():
+        return HTMLResponse(PAGE.read_bytes())  # read every time: an edit lands on reload
+
+    @app.get("/api/scenes")
+    @guarded
+    def scenes():
+        return {"scenes": library.scenes(), "tile": library.tile, "root": plain(library.root)}
+
+    @app.get("/api/scene")
+    @guarded
+    def scene(name: str):
+        return scene_info(library, name)
+
+    @app.get("/preview")
+    @guarded
+    def preview(name: str, max_side: int = Query(4096, alias="max")):
+        return Response(preview_jpeg(library, name, max_side), media_type="image/jpeg")
+
+    @app.get("/cell")
+    @guarded
+    def cell(name: str, x: int, y: int, size: int = 512):
+        payload = cell_jpeg(library, name, x, y, max(128, min(size, library.tile)))
+        return Response(payload, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+    @app.post("/api/layout")
+    @guarded
+    def layout(body: dict = Body(...)):
+        report = write_layout(library, body["name"], body.get("layout", {}))
+        print(f"[picker] layout: {report['moved']} moved, {report['picked']} picked -> {report['path']}", flush=True)
+        return report
+
+    @app.post("/api/apply")
+    @guarded
+    def apply(body: dict = Body(...)):
+        name = body["name"]
+        cells = body.get("cells", [])
+        if not cells:
+            return JSONResponse({"error": "nothing selected"}, status_code=400)
+        report = write_cells(library, name, cells, body.get("format", "png"), int(body.get("quality", 95)))
+        print(
+            f"[picker] {name}: wrote {report['written']} tile(s) -> {report['out_dir']} ({report['total']} in total)"
+        )
+        # the layout is saved with every cut: how a scene was cut is part of the
+        # result, not something to remember to press a button for
+        if body.get("layout") is not None:
+            write_layout(library, name, body["layout"])
+        report["cut"] = cut_cells(library.out_dir(name), library.tile)
+        return report
+
+    return app
 
 
 def main(args):
+    import uvicorn
+
     if not PAGE.is_file():
         raise SystemExit(f"missing the page: {PAGE}")
     library = Library(args.input, args.tile, args.output)
     if not library.root.is_dir():
         raise SystemExit(f"no such folder: {library.root}")
-    Handler.library = library
 
-    scenes = library.sources()
-    print(f"{len(scenes)} image(s) under {library.root}")
-    print(f"tiles go to {library.out_root}/<stem>/")
+    print(f"{len(library.sources())} image(s) under {library.root}")
+    print(f"tiles go to {library.out_root or '<scene folder>/' + SPLIT_DIRNAME}/<stem>/")
     print(f"manual split picker on http://{args.host}:{args.port}")
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("stopped")
+    uvicorn.run(make_app(library), host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-i", "--input", default="../data/satellite_images", help="folder of source images")
-    parser.add_argument("-o", "--output", default=None, help=f"tile root (default: <input>/{SPLIT_DIRNAME})")
+    parser.add_argument(
+        "-o", "--output", default=None, help=f"tile root (default: {SPLIT_DIRNAME}/ beside each scene)"
+    )
     parser.add_argument("--tile", type=int, default=1024, help="cell size in px (default 1024)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("-p", "--port", type=int, default=8011)

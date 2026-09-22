@@ -20,7 +20,7 @@
   select, button { font: inherit; color: var(--text); background: #262c35;
     border: 1px solid var(--line); border-radius: 5px; padding: 5px 9px; cursor: pointer; }
   select { max-width: 46vw; }
-  #scene { max-width: 320px; }  /* the scene names are long; the toolbar is not */
+  #scene { max-width: 420px; }  /* the scene names are long; the toolbar is not */
   button:hover { background: #303845; }
   button:disabled { opacity: .45; cursor: default; }
   button.go { background: var(--accent); border-color: var(--accent); color: #191919; font-weight: 600; }
@@ -48,6 +48,7 @@
 <div id="app">
   <div class="bar">
     <select id="scene" title="scene"></select>
+    <button id="rescan" title="look for new scenes">&#x21bb;</button>
     <button id="fit" title="fit the whole scene">Fit</button>
     <button id="full" title="1 image pixel per screen pixel">100%</button>
     <button id="zoomOut">&minus;</button>
@@ -170,7 +171,7 @@ function requestDetail(visible) {
       draw();
     };
     img.onerror = () => S.asked.delete(tag);
-    img.src = `/cell?name=${encodeURIComponent(S.scene.name)}&x=${cell.x}&y=${cell.y}&size=${size}`;
+    img.src = `cell?name=${encodeURIComponent(S.scene.name)}&x=${cell.x}&y=${cell.y}&size=${size}`;
   }
 }
 
@@ -282,6 +283,7 @@ function fit() {
 }
 
 function zoomAt(x, y, factor) {
+  if (!S.scene) return;
   const min = Math.min(cv.clientWidth / S.scene.width, cv.clientHeight / S.scene.height) * .5;
   const next = Math.max(min, Math.min(2, V.s * factor));
   V.tx = x - (x - V.tx) * (next / V.s);
@@ -303,6 +305,9 @@ function cellAt(x, y) {
 // ------------------------------------------------------------------ events
 let drag = null;
 cv.addEventListener("contextmenu", (e) => e.preventDefault());
+// Framed in the webui, the arrow keys would otherwise scroll the page around us
+// until the canvas had been clicked once.
+cv.addEventListener("mouseenter", () => window.focus());
 cv.addEventListener("wheel", (e) => {
   e.preventDefault();
   if (S.scene) zoomAt(e.offsetX, e.offsetY, e.deltaY < 0 ? 1.18 : 1 / 1.18);
@@ -397,6 +402,7 @@ $("zoomOut").onclick = () => zoomAt(cv.clientWidth / 2, cv.clientHeight / 2, 1 /
 $("none").onclick = () => { S.pick.clear(); draw(); };
 $("all").onclick = () => selectAll();
 $("invert").onclick = () => {
+  if (!S.scene) return;
   const next = new Set();
   for (let r = 0; r < S.scene.rows; r++)
     for (let c = 0; c < S.scene.cols; c++)
@@ -404,6 +410,7 @@ $("invert").onclick = () => {
   S.pick = next; draw();
 };
 function selectAll() {
+  if (!S.scene) return;
   for (let r = 0; r < S.scene.rows; r++)
     for (let c = 0; c < S.scene.cols; c++) S.pick.add(key(r, c));
   draw();
@@ -426,8 +433,9 @@ const layoutPayload = () => ({
 });
 
 async function saveLayout(loud) {
+  if (!S.scene) return;
   try {
-    const response = await fetch("/api/layout", {
+    const response = await fetch("api/layout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: S.scene.name, layout: layoutPayload() }),
@@ -459,7 +467,7 @@ $("apply").onclick = async () => {
   });
   toast(`cutting ${chosen.length} cell(s)…`);
   try {
-    const response = await fetch("/api/apply", {
+    const response = await fetch("api/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -473,6 +481,7 @@ $("apply").onclick = async () => {
     if (!response.ok) throw new Error(report.error || response.statusText);
     S.cut = new Map(report.cut.map((cell) => [key(cell.row, cell.col), cell]));
     S.pick.clear();
+    markCut(S.scene.name, S.cut.size);
     toast(`wrote ${report.written} tile(s) → ${report.out_dir} (${report.total} in total)`);
   } catch (err) {
     toast(String(err.message || err), true);
@@ -482,13 +491,19 @@ $("apply").onclick = async () => {
 };
 
 // ------------------------------------------------------------------- scenes
+const LAST_SCENE = "split_picker.scene";
+const remembered = () => { try { return localStorage.getItem(LAST_SCENE); } catch { return null; } };
+const remember = (name) => { try { localStorage.setItem(LAST_SCENE, name); } catch { /* private window */ } };
+const escapeHtml = (text) => text.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
+
 async function openScene(name) {
   S.detail.clear(); S.asked.clear(); S.pick.clear(); S.off.clear();
   S.preview = null; S.hover = null;
   $("hint").textContent = "loading " + name + " …";
-  const info = await (await fetch("/api/scene?name=" + encodeURIComponent(name))).json();
+  const info = await (await fetch("api/scene?name=" + encodeURIComponent(name))).json();
   if (info.error) { toast(info.error, true); return; }
   S.scene = info;
+  remember(name);
   S.cut = new Map(info.cut.map((cell) => [key(cell.row, cell.col), cell]));
   // pick up where the last session left off: the moves it made, and its selection
   for (const cell of (info.layout && info.layout.cells) || [])
@@ -502,18 +517,60 @@ async function openScene(name) {
     S.previewScale = preview.width / info.width;
     fit();
   };
-  preview.src = `/preview?name=${encodeURIComponent(name)}&max=${PREVIEW_MAX}`;
+  preview.src = `preview?name=${encodeURIComponent(name)}&max=${PREVIEW_MAX}`;
   fit();
 }
 
-(async function start() {
-  const list = await (await fetch("/api/scenes")).json();
+// One entry per scene, grouped by the folder it sits in -- which is also where
+// its tiles go -- with how many of its cells are already cut.
+const sceneLabel = (scene) => scene.stem + (scene.cut ? `  ·  ${scene.cut} cut` : "");
+
+function markCut(name, count) {
+  const option = [...$("scene").options].find((o) => o.value === name);
+  if (option) option.textContent = sceneLabel({ stem: option.dataset.stem, cut: count });
+}
+
+async function loadScenes() {
+  const list = await (await fetch("api/scenes")).json();
+  if (list.error) { toast(list.error, true); return []; }
+  const groups = new Map();
+  for (const scene of list.scenes) {
+    if (!groups.has(scene.folder)) groups.set(scene.folder, []);
+    groups.get(scene.folder).push(scene);
+  }
+  const option = (scene) =>
+    `<option value="${escapeHtml(scene.name)}" data-stem="${escapeHtml(scene.stem)}" ` +
+    `title="${escapeHtml(scene.name)}">${escapeHtml(sceneLabel(scene))}</option>`;
   const select = $("scene");
-  select.innerHTML = list.scenes.map((n) => `<option value="${n}">${n}</option>`).join("");
+  const current = S.scene ? S.scene.name : "";
+  select.innerHTML = `<option value="" disabled>— pick a scene —</option>` +
+    [...groups].map(([folder, scenes]) =>
+      `<optgroup label="${escapeHtml(folder || list.root.split("/").pop())}/">${scenes.map(option).join("")}</optgroup>`
+    ).join("");
+  select.value = current;
+  return list.scenes;
+}
+
+$("rescan").onclick = async () => {
+  const scenes = await loadScenes();
+  toast(`${scenes.length} scene(s)`);
+};
+
+(async function start() {
+  const select = $("scene");
   select.onchange = () => openScene(select.value);
   resize();
-  if (list.scenes.length) openScene(list.scenes[0]);
-  else $("hint").textContent = "no images found";
+  const scenes = await loadScenes();
+  // Reopen what was open last time; otherwise wait to be told -- decoding a
+  // scene nobody asked for only delays the one they want.
+  const last = remembered();
+  if (last && scenes.some((scene) => scene.name === last)) {
+    select.value = last;
+    openScene(last);
+  } else {
+    select.value = "";
+    $("hint").textContent = scenes.length ? "pick a scene from the list above" : "no images found";
+  }
 })();
 </script>
 </body>

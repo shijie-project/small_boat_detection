@@ -20,7 +20,7 @@ class Field:
 
     ``kind="choice"`` renders a dropdown, filled either from :mod:`discovery
     <webui.core.discovery>` (``source`` is the key: ``"configs"`` /
-    ``"checkpoints"`` / ``"satellite"``) or from a fixed ``choices`` tuple;
+    ``"checkpoints"`` / ``"tiles"``) or from a fixed ``choices`` tuple;
     ``kind="multichoice"`` is the same dropdown with several picked at once,
     handing ``build()`` a list instead of a string; ``kind="flag"`` renders a
     checkbox; anything else is a text box. ``value``
@@ -62,9 +62,13 @@ class Feature:
 
     ``slot`` says what the feature competes with (see :mod:`webui.core.jobs`):
     the default puts it in ``run`` with the other GPU work, one at a time.
+    ``None`` is a tab that starts nothing, so it gets no Start / Stop row.
 
     ``wide`` hides the console while the tab is open, giving the panel the whole
     page. A form does not need that; a canvas does.
+
+    :meth:`routes` adds HTTP routes to the webui's own server, for a tab that
+    serves a page of its own rather than launching one.
     """
 
     name = ""
@@ -76,6 +80,10 @@ class Feature:
 
     def build(self, params) -> JobSpec:
         raise NotImplementedError
+
+    def routes(self):
+        """Starlette routes mounted on the webui's server at launch."""
+        return []
 
     def panel(self, options):
         """Render the tab body; returns ``{field name: component}``."""

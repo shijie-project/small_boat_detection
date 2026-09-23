@@ -29,7 +29,9 @@ class DetSolver(BaseSolver):
 
     Stage 1 validates from epoch ``eval_after`` on, every ``eval_freq`` epochs, and its last epoch
     whatever the two say (stage 2 reloads that ``best_stg1.pth``); stage 2 validates every epoch,
-    its patience counts them.
+    its patience counts them. An ``eval_schedule`` of ``[from epoch, every n epochs]`` pairs
+    replaces all three for both stages (the last stage-1 epoch and the last epoch are still
+    always validated), and the patience then counts validations, not epochs.
 
     ``last.pth`` is written after every epoch of either stage and carries the best AP reached so
     far, so a run can be continued with ``-r <run>/last.pth`` and a larger ``epoches``: the
@@ -110,9 +112,12 @@ class DetSolver(BaseSolver):
                 "n_parameters": n_parameters,
             }
             if not self._evaluates(epoch, stage2_start):
-                print(
-                    f"Evaluation skipped (from epoch {cfg.eval_after} every {cfg.eval_freq} epochs, every epoch from {stage2_start})"
-                )
+                if cfg.eval_schedule:
+                    print(f"Evaluation skipped (eval_schedule {cfg.eval_schedule})")
+                else:
+                    print(
+                        f"Evaluation skipped (from epoch {cfg.eval_after} every {cfg.eval_freq} epochs, every epoch from {stage2_start})"
+                    )
                 self._append_log(log_stats)
                 continue
 
@@ -155,10 +160,21 @@ class DetSolver(BaseSolver):
             dist_utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, self.output_dir / "eval.pth")
 
     def _evaluates(self, epoch: int, stage2_start: int) -> bool:
-        """Whether this epoch is validated: in stage 2 always, in stage 1 from ``eval_after`` on every
-        ``eval_freq`` epochs (counted from epoch 0) and on the last stage-1 epoch, which stage 2 reloads."""
+        """
+        Whether this epoch is validated: always on the last stage-1 epoch, which stage 2 reloads,
+        and on the last epoch. Otherwise by ``eval_schedule`` when there is one: the ``every`` of
+        the last ``[from, every]`` pair that has started, counted from epoch 0 as ``eval_freq`` is
+        (so a pair whose ``from`` is a multiple of its ``every`` validates evenly spaced epochs),
+        nothing before the first pair; a run continued past the schedule keeps its last pair.
+        Without one, in stage 2 always, in stage 1 from ``eval_after`` on every ``eval_freq`` epochs.
+        """
         cfg = self.cfg
-        if epoch >= stage2_start or epoch == stage2_start - 1 or epoch == cfg.epoches - 1:
+        if epoch == stage2_start - 1 or epoch == cfg.epoches - 1:
+            return True
+        if cfg.eval_schedule:
+            started = [every for start, every in sorted(cfg.eval_schedule) if start <= epoch]
+            return bool(started) and (epoch + 1) % started[-1] == 0
+        if epoch >= stage2_start:
             return True
         return epoch >= cfg.eval_after and (epoch + 1) % cfg.eval_freq == 0
 
@@ -191,7 +207,7 @@ class DetSolver(BaseSolver):
             return
         (self.output_dir / "eval").mkdir(exist_ok=True)
         filenames = ["latest.pth"]
-        if epoch % 50 == 0:
+        if (epoch + 1) % 50 == 0:  # 049, 099, ...: validated by an eval_schedule of even blocks too
             filenames.append(f"{epoch:03}.pth")
         for name in filenames:
             torch.save(coco_evaluator.coco_eval["bbox"].eval, self.output_dir / "eval" / name)

@@ -1,0 +1,66 @@
+# The training recipe of the ship-only AI-TOD runs: 280 epochs at batch 8, 160 augmented and 120
+# on clean images (the scale and colour augmentations and multi-scale off from epoch 160; the
+# flips and rotations stay, stage 2 starts there). AdamW as in recipe_160, the two decays of 0.8
+# moved with the boundary.
+#
+# Why longer than recipe_160: that recipe was measured on the full AI-TOD, 14018 train +
+# validation images, 1752 iterations an epoch. The ship-only subset keeps 6336 of them, 792
+# iterations an epoch, so 160 of its epochs are 72 of the full set's. The D-FINE-S run of
+# 2026-09-22 on recipe_160 ended with both stages still climbing: stage 1 at +0.13 AP an epoch
+# over its last evaluated epochs (100-107; the full set's baseline was flat there, +0.015), stage
+# 2 at +0.13 an epoch over its last five (47.7 at epoch 108 to 59.1 at 159).
+# - Stage 2 gets 120 epochs, 95k iterations, the full set's 52 clean epochs (91k), and about
+#   three time constants of the saturating curve fitted to that run's stage 2 (41 epochs).
+# - Stage 1 gets 160, between recipe_160's 108 and the 240 that would match the full set's
+#   iterations: an augmented epoch was worth half a clean one at the boundary, and the run never
+#   validated stage 1 before epoch 100, so how far stage 1 was from flat is not known.
+# - The decays sit where recipe_160 has them relative to the boundary: the first three quarters
+#   into stage 1 (80 / 108 there, 120 / 160 here), the second 20 epochs into stage 2. No decay
+#   after it, as in recipe_160.
+#
+# Validation follows eval_schedule (see DetSolver): [from epoch, every n epochs] pairs, counted
+# from epoch 0, plus the last stage-1 epoch (stage 2 reloads that best_stg1.pth) and the last
+# epoch always. Sparse where only the shape of the curve is wanted, dense at the end, where the
+# best checkpoint is picked: 61 validations instead of the 180 of validating every epoch from 100,
+# 44 minutes instead of two hours at 43 s each.
+#   0-119    every 10   the stage-1 curve recipe_160 runs never had
+#   120-239  every 5    stage 1's tail after the first decay, and the stage-2 climb
+#   240-269  every 2
+#   270-279  every epoch
+# The numbered checkpoints every 20 epochs of stage 1 land on validated epochs (19, 39, ...).
+# Overrides the defaults of optimizer.yml, runtime.yml and the datasets' stop_epoch.
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*(?:norm|bn)).*$'
+      lr: 0.00002
+    -
+      params: '^(?=.*backbone)(?=.*(?:norm|bn)).*$'
+      lr: 0.00002
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0002
+  betas: [0.9, 0.999]
+  weight_decay: 0.000065
+
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [120, 180]
+  gamma: 0.8
+
+epoches: 280
+train_dataloader:
+  dataset:
+    transforms:
+      policy:
+        epoch: 160
+  collate_fn:
+    stop_epoch: 160
+
+eval_schedule: [[0, 10], [120, 5], [240, 2], [270, 1]]
+checkpoint_freq: 20

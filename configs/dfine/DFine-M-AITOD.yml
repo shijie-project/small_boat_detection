@@ -1,5 +1,5 @@
 # D-FINE-M baseline on AI-TOD-v2: the plain HybridEncoder and the D-FINE decoder at the M scale
-# (include/scale_m.yml) on the shared 200-epoch recipe. 300 queries, D-FINE's default, as the S
+# (include/scale_m.yml) on the shared 280-epoch recipe. 300 queries, D-FINE's default, as the S
 # scale uses; the tiles reach 2667 objects and the evaluator keeps 1500 detections per image,
 # which the per-image budget of the Ours config is for.
 
@@ -10,7 +10,7 @@ __include__: [
   './include/optimizer.yml',
   './include/dfine_hgnetv2.yml',
   './include/scale_m.yml',
-  './include/recipe_160.yml',
+  './include/recipe_280.yml',
 ]
 
 output_dir: ./outputs/dfine_m_aitod

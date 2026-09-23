@@ -136,6 +136,8 @@ class BaseConfig:
         # DetSolver)
         self.eval_freq: int = 1
         self.eval_after: int = 0
+        # [from epoch, every n epochs] pairs for both stages; replaces the two above when given
+        self.eval_schedule: list[list[int]] = None
         # stage 2 reloads the best stage-1 checkpoint after this many evaluated epochs without a new
         # best; 0 never reloads, which is what a run continued past its schedule wants (see DetSolver)
         self.patience: int = 6

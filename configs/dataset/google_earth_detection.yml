@@ -1,0 +1,27 @@
+task: detection
+
+# Tier B: the Google Earth research tiles alone, ~1.0 m GSD, 1024 x 1024, annotated in Label Studio.
+# The de-duplicated file (annotations/google_coco_dedup.json, 701 tiles, 1,299 boats, 74 empty)
+# split 80/20 by tools/annotation/random_split_coco.py, seed 42, stratified on empty / non-empty:
+#   train 561 tiles, 1,035 boxes, 59 empty
+#   val   140 tiles,   264 boxes, 15 empty
+# A tile holds 1.8 boats on average and at most 15. Boxes are 5-20 px on the long side (10th-90th
+# percentile), the same scale as the rest of AEA.
+#
+# Everything but the files is aea_detection.yml's: the ship-only labelling that keeps an AI-TOD
+# checkpoint's classification head, the evaluator, the 1024 input and the augmentation (magnify
+# only, the 8-fold dihedral group, photometric jitter). The images stay in images/all, which both
+# splits read; images/train and images/val belong to the older mixed-tier split and still hold
+# the duplicate tiles.
+
+__include__: ['./aea_detection.yml']
+
+train_dataloader:
+  dataset:
+    img_folder: ../data/images/all
+    ann_file: ../data/annotations/tier_b/train_coco.json
+
+val_dataloader:
+  dataset:
+    img_folder: ../data/images/all
+    ann_file: ../data/annotations/tier_b/val_coco.json

@@ -393,6 +393,41 @@ function draw() {
 
 const corners = (x, y, w, h) => [[x, y], [x + w, y], [x, y + h], [x + w, y + h]];
 
+/* The selected box's handles on the canvas: a corner (0-3, as corners() lists them) within 8 px,
+   or a side ('l', 'r', 't', 'b') within 5 px of it. The sides are only offered on a box at least
+   24 px across on screen: on a smaller one they would leave nothing in the middle to move it by. */
+const HANDLE_CURSOR = {
+  0: 'nwse-resize', 3: 'nwse-resize', 1: 'nesw-resize', 2: 'nesw-resize',
+  l: 'ew-resize', r: 'ew-resize', t: 'ns-resize', b: 'ns-resize',
+};
+
+function handleAt(sx, sy) {
+  const sel = S.annById.get(S.selId);
+  if (!sel || sel.image_id !== S.curImage) return null;
+  const [x, y] = toScreen(sel.bbox[0], sel.bbox[1]);
+  const w = sel.bbox[2] * view.scale, h = sel.bbox[3] * view.scale;
+  const cs = corners(x, y, w, h);
+  for (let i = 0; i < 4; i++) if (Math.hypot(cs[i][0] - sx, cs[i][1] - sy) < 8) return i;
+  if (w < 24 || h < 24) return null;
+  const inX = sx > x && sx < x + w, inY = sy > y && sy < y + h;
+  if (inY && Math.abs(sx - x) < 5) return 'l';
+  if (inY && Math.abs(sx - x - w) < 5) return 'r';
+  if (inX && Math.abs(sy - y) < 5) return 't';
+  if (inX && Math.abs(sy - y - h) < 5) return 'b';
+  return null;
+}
+
+/* What a press here would do, shown before it is done: the canvas cursor is the only sign that
+   a box on it can be grabbed at all. */
+function hoverCursor(sx, sy) {
+  const h = handleAt(sx, sy);
+  if (h !== null) return HANDLE_CURSOR[h];
+  const [wx, wy] = toWorld(sx, sy);
+  if (hitTest(wx, wy)) return 'move';
+  if (S.hasPred && S.showPred && hitTest(wx, wy, predsOf(S.curImage))) return 'pointer';
+  return 'crosshair';
+}
+
 /* dragging on the canvas: pan, move, resize, or draw a new box */
 const drag = { mode: null, id: null, corner: null, start: null, orig: null, rect: null };
 
@@ -433,17 +468,12 @@ canvas.addEventListener('pointerdown', (e) => {
     drag.orig = [view.ox, view.oy];
     return;
   }
-  const sel = S.annById.get(S.selId);
-  if (sel) {                                    // a corner of the selected box?
-    const [bx, by] = toScreen(sel.bbox[0], sel.bbox[1]);
-    const cs = corners(bx, by, sel.bbox[2] * view.scale, sel.bbox[3] * view.scale);
-    for (let i = 0; i < 4; i++) {
-      if (Math.hypot(cs[i][0] - sx, cs[i][1] - sy) < 7) {
-        drag.mode = 'resize'; drag.id = sel.id; drag.corner = i; drag.orig = [...sel.bbox];
-        pushUndo();
-        return;
-      }
-    }
+  const handle = handleAt(sx, sy);                // a corner or side of the selected box?
+  if (handle !== null) {
+    const sel = S.annById.get(S.selId);
+    drag.mode = 'resize'; drag.id = sel.id; drag.corner = handle; drag.orig = [...sel.bbox];
+    pushUndo();
+    return;
   }
   const hit = hitTest(wx, wy);
   const predHit = !hit && S.hasPred && S.showPred && hitTest(wx, wy, predsOf(S.curImage));
@@ -462,7 +492,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   const r = canvas.getBoundingClientRect();
   const sx = e.clientX - r.left, sy = e.clientY - r.top;
-  if (!drag.mode) return;
+  if (!drag.mode) { canvas.style.cursor = hoverCursor(sx, sy); return; }
   const [s0x, s0y, w0x, w0y] = drag.start;
   const dxw = (sx - s0x) / view.scale, dyw = (sy - s0y) / view.scale;
 
@@ -476,7 +506,7 @@ canvas.addEventListener('pointermove', (e) => {
     touched(a);
   } else if (drag.mode === 'resize') {
     const a = S.annById.get(drag.id);
-    resizeCorner(a, drag.orig, drag.corner, dxw, dyw);
+    resizeHandle(a, drag.orig, drag.corner, dxw, dyw);
     touched(a);
   } else if (drag.mode === 'new') {
     const [wx, wy] = toWorld(sx, sy);
@@ -535,12 +565,13 @@ function hitTest(wx, wy, boxes = annsOf(S.curImage)) {
   return hits.sort((a, b) => a.bbox[2] * a.bbox[3] - b.bbox[2] * b.bbox[3])[0];   // smallest first
 }
 
-function resizeCorner(a, orig, corner, dx, dy) {
+/* A corner (0-3) moves two sides, a side ('l', 'r', 't', 'b') one. */
+function resizeHandle(a, orig, handle, dx, dy) {
   let [x, y, w, h] = orig;
-  if (corner === 0) { x += dx; y += dy; w -= dx; h -= dy; }
-  if (corner === 1) { y += dy; w += dx; h -= dy; }
-  if (corner === 2) { x += dx; w -= dx; h += dy; }
-  if (corner === 3) { w += dx; h += dy; }
+  if (handle === 0 || handle === 2 || handle === 'l') { x += dx; w -= dx; }
+  if (handle === 1 || handle === 3 || handle === 'r') w += dx;
+  if (handle === 0 || handle === 1 || handle === 't') { y += dy; h -= dy; }
+  if (handle === 2 || handle === 3 || handle === 'b') h += dy;
   if (w < 0) { x += w; w = -w; }
   if (h < 0) { y += h; h = -h; }
   a.bbox = [x, y, Math.max(1, w), Math.max(1, h)];
@@ -708,7 +739,7 @@ function wireCell(el) {
     const a = S.annById.get(id);
     const dx = (e.clientX - d.x) / d.z, dy = (e.clientY - d.y) / d.z;
     if (d.corner === null) a.bbox = [d.orig[0] + dx, d.orig[1] + dy, d.orig[2], d.orig[3]];
-    else resizeCorner(a, d.orig, d.corner, dx, dy);
+    else resizeHandle(a, d.orig, d.corner, dx, dy);
     touched(a);
     draw();
   });

@@ -79,7 +79,9 @@ one into an annotation (confirmed), for a vessel the annotation missed.
 - **left** — the images, with how many of their boxes are reviewed. Green: all done. Amber: partly.
   Red: something is flagged.
 - **middle** — the image itself. Wheel zooms at the cursor, right-drag (or Alt+left-drag) pans,
-  left-drag on empty space draws a new box, drag a corner of the selected box to resize. Boxes
+  left-drag on empty space draws a new box, drag a box to move it, and a corner or side of the
+  selected box to resize it (the sides once the box is 24 px or more on screen); the cursor
+  shows which of these a press would do. Boxes
   under 6 px on screen get a halo so they can be found at all. A drag longer than 12 times its
   width is taken for a slipped pan, not a ship: it turns red while dragged and is not kept.
 - **right** — one magnified crop per box. Zoom is per box: each crop is scaled so the box fills

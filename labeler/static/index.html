@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ship box review</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <span class="brand">ship box review</span>
+  <button id="source" class="source" title="Switch the annotation file, image folder or predictions">Data source…</button>
+  <span class="sep"></span>
+  <label>Grid <select id="scope">
+    <option value="image">This image</option>
+    <option value="all">All images</option>
+  </select></label>
+  <label>Filter <select id="filter">
+    <optgroup label="Annotations">
+      <option value="all">All</option>
+      <option value="unreviewed">Unreviewed</option>
+      <option value="ok">Confirmed</option>
+      <option value="flag">Flagged</option>
+      <option value="edited">Edited</option>
+    </optgroup>
+    <optgroup label="Against predictions" class="predonly">
+      <option value="fn">Annotations without a prediction (missed)</option>
+      <option value="fp">Predictions without an annotation (false alarms)</option>
+      <option value="iou:0:0.3">Pairs, IoU &lt; 0.3</option>
+      <option value="iou:0.3:0.5">Pairs, IoU 0.3–0.5</option>
+      <option value="iou:0.5:0.7">Pairs, IoU 0.5–0.7</option>
+      <option value="iou:0.7:0.9">Pairs, IoU 0.7–0.9</option>
+      <option value="iou:0.9:1.01">Pairs, IoU ≥ 0.9</option>
+      <option value="preds">All predictions</option>
+    </optgroup>
+  </select></label>
+  <label>Sort <select id="sort">
+    <option value="default">Default</option>
+    <option value="size-asc">Smallest box first</option>
+    <option value="size-desc">Largest box first</option>
+    <option value="iou-asc" class="predonly">Lowest IoU first</option>
+    <option value="score-desc" class="predonly">Highest score first</option>
+    <option value="score-asc" class="predonly">Lowest score first</option>
+  </select></label>
+  <label>Zoom <input id="cellzoom" type="range" min="60" max="220" step="10" value="120"></label>
+  <span class="sep"></span>
+  <span id="predctl" class="predctl" hidden>
+    <label title="Draw the predictions on the canvas and in the grid"><input id="showpred" type="checkbox" checked> <span class="swatch pred"></span>ship-pred</label>
+    <label title="Predictions below this score are neither drawn nor paired">Score ≥ <input id="scorethr" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+    <label title="A prediction and an annotation are paired only at this IoU or above; predictions go in falling score order, and each annotation takes at most one">Pair IoU ≥ <input id="pairmin" type="number" min="0.01" max="1" step="0.05" value="0.1"></label>
+    <span id="predstats" class="progress"></span>
+    <span class="sep"></span>
+  </span>
+  <span id="progress" class="progress"></span>
+  <span class="grow"></span>
+  <span id="savestate" class="savestate">—</span>
+  <button id="save">Save (Ctrl+S)</button>
+  <button id="help" title="Keyboard shortcuts">?</button>
+</header>
+
+<main>
+  <aside id="imagelist">
+    <input id="imagesearch" type="search" placeholder="Search file names…">
+    <div id="images"></div>
+  </aside>
+
+  <section id="stage">
+    <canvas id="canvas"></canvas>
+    <div id="stageinfo"></div>
+    <div id="stagehint">Wheel: zoom · right-drag (or Alt+drag): pan · drag on empty space: new box · F: fit</div>
+  </section>
+
+  <aside id="gridpane">
+    <div id="gridhead"></div>
+    <div id="grid"></div>
+  </aside>
+</main>
+
+<div id="picker" hidden>
+  <h3>Data source</h3>
+  <div class="picked">
+    <div>
+      <span class="lbl">Annotations</span>
+      <input id="pickcoco" type="text" spellcheck="false" placeholder="Full path of the COCO json; paste or pick below">
+      <button class="goto" data-go="coco" title="Show it in the browser below">Locate</button>
+    </div>
+    <div>
+      <span class="lbl">Images</span>
+      <input id="pickimages" type="text" spellcheck="false" placeholder="Full path of the image folder">
+      <button class="goto" data-go="images" title="Open it in the browser below">Locate</button>
+    </div>
+    <div>
+      <span class="lbl">Write to</span>
+      <input id="pickout" type="text" spellcheck="false" placeholder="Empty: named after the annotation file">
+      <button class="goto" data-go="reset" title="Name it after the annotation file again">Auto</button>
+    </div>
+    <div>
+      <span class="lbl">Predictions</span>
+      <input id="pickpred" type="text" spellcheck="false" placeholder="Optional: predictions.json (COCO results) with the image ids of the annotation file">
+      <button class="goto" data-go="pred" title="Show it in the browser below">Locate</button>
+      <button class="goto" data-go="clearpred" title="Load no predictions">Clear</button>
+    </div>
+    <div class="target">
+      <span class="lbl">A clicked json fills</span>
+      <label><input type="radio" name="target" value="coco" checked> Annotations</label>
+      <label><input type="radio" name="target" value="pred"> Predictions</label>
+    </div>
+  </div>
+  <div id="crumbs"></div>
+  <div id="browser"></div>
+  <div class="pickfoot">
+    <span id="pickmsg"></span>
+    <span class="grow"></span>
+    <button id="pickcancel">Cancel</button>
+    <button id="pickopen" class="primary">Open</button>
+  </div>
+</div>
+
+<div id="helpbox" hidden>
+  <h3>Keyboard shortcuts</h3>
+  <table>
+    <tr><td>Arrows</td><td>Move the selected box 1 px (5 px with Shift)</td></tr>
+    <tr><td>Ctrl + arrows</td><td>Resize the selected box</td></tr>
+    <tr><td>Space</td><td>Confirm, and go to the next unreviewed box</td></tr>
+    <tr><td>X</td><td>Flag as doubtful</td></tr>
+    <tr><td>D / Delete</td><td>Delete the selected box (or click the × on its crop)</td></tr>
+    <tr><td>N / P</td><td>Next / previous box</td></tr>
+    <tr><td>J / K</td><td>Next / previous image</td></tr>
+    <tr><td>F</td><td>Fit the canvas to the window</td></tr>
+    <tr><td>Ctrl + Z / Ctrl + Y</td><td>Undo / redo</td></tr>
+    <tr><td>Ctrl + S</td><td>Save now (saving is automatic 2 s after a change)</td></tr>
+    <tr><td>A</td><td>With a prediction selected: add it as an annotation (confirmed)</td></tr>
+  </table>
+  <p>In the grid: click a crop to select it and centre the canvas on it; drag the box to move it and a corner to resize it; double-click to zoom the canvas in on it.</p>
+  <p>With predictions loaded: predictions are cyan and dashed (ship-pred) and read-only. In each image, predictions in
+    falling score order are paired with the unpaired annotation they overlap most, if that IoU reaches "Pair IoU". The
+    "Against predictions" filters list the missed annotations, the false alarms and the pairs by IoU; the dashed cyan box
+    in an annotation's crop is its paired prediction. TP / FP / FN in the header count the pairs at IoU ≥ 0.5.</p>
+  <button id="helpclose">Close</button>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

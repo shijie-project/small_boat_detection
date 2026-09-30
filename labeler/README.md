@@ -80,12 +80,17 @@ one into an annotation (confirmed), for a vessel the annotation missed.
   Red: something is flagged.
 - **middle** — the image itself. Wheel zooms at the cursor, right-drag (or Alt+left-drag) pans,
   left-drag on empty space draws a new box, drag a corner of the selected box to resize. Boxes
-  under 6 px on screen get a halo so they can be found at all.
+  under 6 px on screen get a halo so they can be found at all. A drag longer than 12 times its
+  width is taken for a slipped pan, not a ship: it turns red while dragged and is not kept.
 - **right** — one magnified crop per box. Zoom is per box: each crop is scaled so the box fills
   about 45% of the cell, up to 24x, and the cell says what zoom it used. Drag the box inside the
   crop to move it, drag a corner to resize; the crop stays anchored where it was, so a box you have
   shifted reads as shifted. Click selects and takes the canvas there; double-click zooms the canvas
   in on it.
+
+The edge between a side pane and the canvas can be dragged to make the pane wider or narrower
+(the canvas keeps at least 320 px); a double-click on it gives back the default width. The widths
+are remembered by the browser.
 
 ## Keys
 

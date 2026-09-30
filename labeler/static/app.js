@@ -55,7 +55,9 @@ async function boot(st) {
   S.status = st.review.status || {};
   S.deleted = st.review.deleted || [];
   S.edited = new Set(st.review.edited || []);
-  S.nextId = 1 + S.anns.reduce((m, a) => Math.max(m, a.id), 0);
+  // past the deleted and edited ids too: a box drawn after a reload must not take the id of one
+  // deleted before it, or the review record would name two different boxes by one id
+  S.nextId = 1 + Math.max(0, ...S.anns.map((a) => a.id), ...S.deleted.map((d) => d.id), ...S.edited);
   S.categoryId = st.categories[0]?.id ?? 1;
   S.undo.length = S.redo.length = 0;
   S.dirty = false;
@@ -372,7 +374,7 @@ function draw() {
   }
   if (drag.mode === 'new' && drag.rect) {
     const [x, y] = toScreen(drag.rect[0], drag.rect[1]);
-    ctx.strokeStyle = '#4aa3ff';
+    ctx.strokeStyle = newBoxProblem(drag.rect) === 'thin' ? '#ff5f57' : '#4aa3ff';   // red: will not be kept
     ctx.setLineDash([4, 3]);
     ctx.strokeRect(x, y, drag.rect[2] * view.scale, drag.rect[3] * view.scale);
     ctx.setLineDash([]);
@@ -393,6 +395,28 @@ const corners = (x, y, w, h) => [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]
 
 /* dragging on the canvas: pan, move, resize, or draw a new box */
 const drag = { mode: null, id: null, corner: null, start: null, orig: null, rect: null };
+
+/* A rectangle dragged on empty space becomes a box only if it could be a ship: at least 3 screen
+   px a side, so a click that slips is not a box, and at most 12 times as long as it is wide. The
+   tier_b boxes stay under 5.5 to 1; a long sliver is a swipe across the image (a pan tried with
+   the left button), which is how 116.8 x 1.4 and 304.6 x 2.4 px boxes got drawn on image 0. */
+const NEW_MIN_PX = 3, NEW_MAX_RATIO = 12;
+
+function newBoxProblem([, , w, h]) {
+  if (w * view.scale < NEW_MIN_PX || h * view.scale < NEW_MIN_PX) return 'small';
+  if (Math.max(w, h) / Math.min(w, h) > NEW_MAX_RATIO) return 'thin';
+  return null;
+}
+
+/* The hint in the canvas corner says for a moment why nothing was drawn. */
+function flashHint(msg) {
+  const el = $('#stagehint');
+  el.dataset.text ??= el.textContent;
+  el.textContent = msg;
+  el.classList.add('warn');
+  clearTimeout(flashHint.timer);
+  flashHint.timer = setTimeout(() => { el.textContent = el.dataset.text; el.classList.remove('warn'); }, 3000);
+}
 
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -462,7 +486,12 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 canvas.addEventListener('pointerup', () => {
-  if (drag.mode === 'new' && drag.rect && drag.rect[2] * view.scale >= 3 && drag.rect[3] * view.scale >= 3) {
+  const problem = drag.mode === 'new' && drag.rect ? newBoxProblem(drag.rect) : 'none';
+  if (problem === 'thin') {
+    const [w, h] = drag.rect.slice(2).map((v) => v.toFixed(1));
+    flashHint(`Not drawn: ${w} × ${h} px is too thin for a ship (over ${NEW_MAX_RATIO}:1). Pan with right-drag or Alt+drag`);
+  }
+  if (problem === null) {
     pushUndo();
     const a = {
       id: S.nextId++, image_id: S.curImage, category_id: S.categoryId,
@@ -888,12 +917,19 @@ function renderCrumbs(d) {
   const host = $('#crumbs');
   host.innerHTML = '';
   const parts = d.path.split(/[\\/]/);
+  // the folders above --root are shown for orientation only: the server refuses to list them
+  const top = d.root.split(/[\\/]/).filter(Boolean).length - 1;
   parts.forEach((p, i) => {
     const full = parts.slice(0, i + 1).join('\\');
     const el = document.createElement('span');
     el.className = 'crumb';
     el.textContent = p || '\\';
-    el.onclick = () => browse(full);
+    if (i < top) {
+      el.classList.add('above');
+      el.title = `outside --root (${d.root}); restart the server with a wider --root to browse it`;
+    } else {
+      el.onclick = () => browse(/:$/.test(full) ? full + '\\' : full);  // "C:" alone is C:'s cwd
+    }
     host.appendChild(el);
     if (i < parts.length - 1) host.appendChild(document.createTextNode(' \\ '));
   });
@@ -931,6 +967,57 @@ async function applyPicker() {
   if (!r.ok) { pickMsg(detail(await r.text()), 'error'); return; }
   $('#picker').hidden = true;
   await boot(await r.json());
+}
+
+/* ------------------------------------------------------------ splitters */
+
+/* The image list and the grid are as wide as their inner edge is dragged, and a double-click on
+   the edge gives back the default. The widths are remembered by this browser, nowhere else. */
+const PANE_MIN = 160, STAGE_MIN = 320;
+
+function setPaneWidth(side, px) {
+  if (px == null) $('main').style.removeProperty(`--${side}-w`);
+  else $('main').style.setProperty(`--${side}-w`, `${px}px`);
+  if (S.curImage != null) draw();          // the canvas takes whatever width is left
+}
+
+function rememberPaneWidth(side, px) {
+  try {
+    if (px == null) localStorage.removeItem(`labeler.${side}-w`);
+    else localStorage.setItem(`labeler.${side}-w`, String(px));
+  } catch { /* private window or blocked storage: the width just is not remembered */ }
+}
+
+for (const h of document.querySelectorAll('.splitter')) {
+  const side = h.dataset.side;
+  const pane = h.parentElement;
+  const other = side === 'left' ? $('#gridpane') : $('#imagelist');
+  h.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    h.setPointerCapture(e.pointerId);
+    h.classList.add('drag');
+    document.body.classList.add('resizing');
+    const x0 = e.clientX, w0 = pane.getBoundingClientRect().width;
+    let px = Math.round(w0);
+    h.onpointermove = (m) => {
+      const dx = side === 'left' ? m.clientX - x0 : x0 - m.clientX;
+      const max = $('main').clientWidth - other.getBoundingClientRect().width - STAGE_MIN;
+      px = Math.round(clamp(w0 + dx, PANE_MIN, Math.max(PANE_MIN, max)));
+      setPaneWidth(side, px);
+    };
+    h.onpointerup = h.onpointercancel = () => {
+      h.onpointermove = h.onpointerup = h.onpointercancel = null;
+      h.classList.remove('drag');
+      document.body.classList.remove('resizing');
+      rememberPaneWidth(side, px);
+    };
+  };
+  h.ondblclick = () => { setPaneWidth(side, null); rememberPaneWidth(side, null); };
+  let saved = 0;
+  try { saved = Number(localStorage.getItem(`labeler.${side}-w`)) || 0; } catch { /* as above */ }
+  // a width kept from a wider window must still leave the canvas room
+  if (saved) setPaneWidth(side, Math.round(clamp(saved, PANE_MIN, window.innerWidth * 0.45)));
 }
 
 /* --------------------------------------------------------------- wiring */

@@ -61,17 +61,28 @@ input[type="range"] { width: 90px; accent-color: var(--accent); }
 main {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px minmax(320px, 1fr) minmax(280px, 34vw);
+  /* the two side panes follow their dragged edge (--left-w / --right-w, set by the splitters) */
+  grid-template-columns: var(--left-w, 240px) minmax(320px, 1fr) var(--right-w, minmax(280px, 34vw));
   min-height: 0;
 }
 
-/* narrow windows: the image list is the first thing worth giving up, then the canvas shrinks */
-@media (max-width: 1100px) {
-  main { grid-template-columns: minmax(280px, 1fr) minmax(240px, 45vw); }
-  #imagelist { display: none; }
-}
-
 aside, section { min-width: 0; min-height: 0; }
+aside { position: relative; }
+
+/* the drag handle on the inner edge of a side pane, wider than the 1 px border it sits on */
+.splitter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+#imagelist .splitter { right: -4px; }
+#gridpane .splitter { left: -4px; }
+.splitter:hover, .splitter.drag { background: #4aa3ff55; }
+body.resizing { cursor: col-resize; user-select: none; }
 
 #imagelist {
   background: var(--panel);
@@ -81,6 +92,13 @@ aside, section { min-width: 0; min-height: 0; }
 }
 #imagesearch { margin: 8px; }
 #images { overflow-y: auto; flex: 1; }
+
+/* narrow windows: the image list is the first thing worth giving up, then the canvas shrinks.
+   After the #imagelist rule, or its display: flex wins and the list stays in the grid. */
+@media (max-width: 1100px) {
+  main { grid-template-columns: minmax(280px, 1fr) var(--right-w, minmax(240px, 45vw)); }
+  #imagelist { display: none; }
+}
 
 .imgrow {
   padding: 5px 10px;
@@ -121,6 +139,7 @@ aside, section { min-width: 0; min-height: 0; }
 }
 #stageinfo { left: 10px; top: 10px; }
 #stagehint { left: 10px; bottom: 10px; }
+#stagehint.warn { color: var(--todo); border-color: var(--todo); }
 
 #gridpane {
   background: var(--panel);
@@ -270,6 +289,7 @@ aside, section { min-width: 0; min-height: 0; }
 #crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; color: var(--muted); }
 #crumbs .crumb { cursor: pointer; color: var(--accent); }
 #crumbs .crumb:hover { text-decoration: underline; }
+#crumbs .crumb.above { cursor: default; color: var(--muted); text-decoration: none; }
 #crumbs .n { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
 
 #browser {

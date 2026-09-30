@@ -15,6 +15,14 @@ Reads the COCO file, writes a copy: the annotations to ``--out`` and the review 
 same COCO file), or a COCO file whose annotations carry a ``score``. The page draws them beside the
 annotations as ``ship-pred``, pairs them with the annotations by IoU, and can list the annotations
 no detection found, the detections no annotation explains, and the pairs by how well they overlap.
+
+``--no-coco`` starts from the image folder alone, for tiles nobody has annotated yet: the image list
+is read from the folder (and from ``--out`` once it exists, so the ids stay put), and the output
+defaults to ``<folder>/<folder name>_coco.json``. The predictions of such tiles are the
+``predictions.json`` of ``tools/inference/torch_inf_dir.py``, whose ``detections.json`` beside it
+names the tile of every ``image_id``. ``--preannotate SCORE`` then turns the detections at or above
+SCORE into annotations, on the images that have none, when a review starts (no ``--out`` yet): the
+boxes to confirm, correct or delete, rather than to draw.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 
 HERE = Path(__file__).parent
 # the repository sits beside the data: code/small_boat_detection/labeler -> code/data
@@ -46,41 +55,86 @@ class Store:
 
     def __init__(
         self,
-        coco_path: Path,
+        coco_path: Path | None,
         images_dir: Path,
         out_path: Path | None,
         root: Path,
         pred_path: Path | None = None,
         pred_min_score: float = 0.05,
+        preannotate: float | None = None,
     ):
         self.lock = threading.Lock()
         self.root = root
         self.pred_min_score = pred_min_score
-        self.load(coco_path, images_dir, out_path, pred_path)
+        self.load(coco_path, images_dir, out_path, pred_path, preannotate)
 
     def load(
-        self, coco_path: Path, images_dir: Path, out_path: Path | None = None, pred_path: Path | None = None
+        self,
+        coco_path: Path | None,
+        images_dir: Path,
+        out_path: Path | None = None,
+        pred_path: Path | None = None,
+        preannotate: float | None = None,
     ) -> None:
-        """Point the store at another dataset; ``--out`` defaults to a sibling of the input."""
-        coco_path = coco_path.resolve()
-        coco = json.loads(coco_path.read_text(encoding="utf-8"))
+        """Point the store at another dataset; ``--out`` defaults to a sibling of the input, or to
+        ``<folder>/<folder name>_coco.json`` when there is no input file."""
+        images_dir = images_dir.resolve()
+        coco_path = coco_path.resolve() if coco_path else None
+        if out_path:
+            out_path = out_path.resolve()
+        elif coco_path:
+            out_path = coco_path.with_name(coco_path.stem + "_reviewed.json")
+        else:
+            out_path = images_dir / f"{images_dir.name}_coco.json"
+        saved = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
+        if coco_path:
+            coco = json.loads(coco_path.read_text(encoding="utf-8"))
+        else:
+            coco = _coco_from_folder(images_dir, saved, pred_path)
         # read the predictions before anything is replaced, so a bad file leaves the old dataset open
         preds, pred_info = self._read_predictions(pred_path, {im["id"] for im in coco["images"]})
-        self.coco_path = coco_path
-        self.images_dir = images_dir.resolve()
-        self.out_path = (out_path or coco_path.with_name(coco_path.stem + "_reviewed.json")).resolve()
-        self.review_path = self.out_path.with_name(self.out_path.stem + "_review.json")
-        self.coco = coco
-        self.preds, self.pred_info = preds, pred_info
+        review_path = out_path.with_name(out_path.stem + "_review.json")
         # a resumed session reads back what was written last, so the review survives a restart
-        self.review = (
-            json.loads(self.review_path.read_text(encoding="utf-8"))
-            if self.review_path.exists()
+        review = (
+            json.loads(review_path.read_text(encoding="utf-8"))
+            if review_path.exists()
             else {"status": {}, "deleted": [], "edited": []}
         )
-        if self.out_path.exists():
-            saved = json.loads(self.out_path.read_text(encoding="utf-8"))
-            self.coco["annotations"] = saved.get("annotations", self.coco["annotations"])
+        if saved is not None:
+            coco["annotations"] = saved.get("annotations", coco["annotations"])
+        elif preannotate is not None and preds:
+            # a review that starts from the model: its confident boxes, on the images with none yet
+            # an image marked "annotated": false is one nobody has looked at; without the mark, one
+            # with no boxes. A tile annotated as empty (a negative example) keeps its mark, and no box
+            annotated = {a["image_id"] for a in coco["annotations"]}
+            annotated |= {im["id"] for im in coco["images"] if im.get("annotated") is True}
+            next_id = 1 + max((a["id"] for a in coco["annotations"]), default=0)
+            ships = [c["id"] for c in coco["categories"] if c["name"] == "ship"] or [
+                c["id"] for c in coco["categories"]
+            ]
+            category = ships[0] if ships else 1
+            added = []
+            for p in preds:
+                if p["score"] < preannotate or p["image_id"] in annotated:
+                    continue
+                x, y, w, h = p["bbox"]
+                added.append(
+                    {
+                        "id": next_id + len(added),
+                        "image_id": p["image_id"],
+                        "category_id": category,
+                        "bbox": [x, y, w, h],
+                        "area": round(w * h, 2),
+                        "iscrowd": 0,
+                        "ignore": 0,
+                        "segmentation": [],
+                    }
+                )
+            coco["annotations"] = coco["annotations"] + added
+            review["preannotated"] = {"min_score": preannotate, "ids": [a["id"] for a in added]}
+        self.coco_path, self.images_dir, self.out_path, self.review_path = coco_path, images_dir, out_path, review_path
+        self.coco, self.review = coco, review
+        self.preds, self.pred_info = preds, pred_info
 
     def _read_predictions(self, path: Path | None, image_ids: set) -> tuple[list[dict], dict]:
         """The detections, as ``{id, image_id, bbox, score}`` with negative ids so they can never be
@@ -153,7 +207,7 @@ class Store:
             "pred": self.pred_info,
             "review": self.review,
             "paths": {
-                "coco": str(self.coco_path),
+                "coco": str(self.coco_path) if self.coco_path else "",
                 "out": str(self.out_path),
                 "review": str(self.review_path),
                 "images": str(self.images_dir),
@@ -175,10 +229,53 @@ class Store:
             self.coco["annotations"] = annotations
             self.review = review
             out = dict(self.coco)
-            out["info"] = {**self.coco.get("info", {}), "description": f"reviewed from {self.coco_path.name}"}
+            source = self.coco_path.name if self.coco_path else f"the images of {self.images_dir.name}"
+            out["info"] = {**self.coco.get("info", {}), "description": f"reviewed from {source}"}
             _write_atomic(self.out_path, out)
             _write_atomic(self.review_path, review)
         return {"ok": True, "n_annotations": len(annotations), "out": str(self.out_path)}
+
+
+def _coco_from_folder(images_dir: Path, saved: dict | None, pred_path: Path | None) -> dict:
+    """A COCO skeleton for a folder of tiles: an image entry per file, no annotations.
+
+    The images an earlier session wrote to ``--out`` keep their ids; a file new to the folder takes
+    the ``image_id`` that ``detections.json`` (beside the predictions) gave its tile, or the next
+    free one. Without that file a prediction could not be told which tile it belongs to."""
+    tile_ids: dict[str, int] = {}
+    categories = [{"id": 1, "name": "ship"}]
+    if pred_path is not None:
+        manifest = pred_path.resolve().with_name("detections.json")
+        if not manifest.is_file():
+            raise ValueError(
+                f"{pred_path.name} without an annotation file needs the detections.json that "
+                "tools/inference/torch_inf_dir.py writes beside it, to know which tile each image_id is"
+            )
+        det = json.loads(manifest.read_text(encoding="utf-8"))
+        tile_ids = {t["name"]: int(t["image_id"]) for t in det.get("tiles", []) if "image_id" in t}
+        # the one class the boxes are: ship, with the id the inference run's --coco gave it
+        ships = [int(k) for k, v in (det.get("class_names") or {}).items() if v == "ship"]
+        if ships:
+            categories = [{"id": ships[0], "name": "ship"}]
+    images = list(saved["images"]) if saved else []
+    if saved and saved.get("categories"):
+        categories = saved["categories"]
+    known = {im["file_name"] for im in images}
+    taken = {im["id"] for im in images}
+    next_id = 1 + max([*taken, *tile_ids.values()], default=0)
+    for path in sorted(images_dir.iterdir(), key=lambda p: p.name.lower()):
+        if path.suffix.lower() not in IMAGE_SUFFIXES or path.name in known or not path.is_file():
+            continue
+        image_id = tile_ids.get(path.name)
+        if image_id is None or image_id in taken:
+            image_id, next_id = next_id, next_id + 1
+        with Image.open(path) as im:
+            width, height = im.size
+        images.append({"id": image_id, "file_name": path.name, "width": width, "height": height, "annotated": False})
+        taken.add(image_id)
+    if not images:
+        raise ValueError(f"no images in {images_dir}")
+    return {"images": images, "annotations": [], "categories": categories}
 
 
 def _write_atomic(path: Path, obj: Any) -> None:
@@ -241,8 +338,9 @@ def build_app(store: Store) -> FastAPI:
 
     @app.post("/api/open")
     def open_dataset(payload: dict[str, Any]) -> dict[str, Any]:
-        """Switch to another COCO file / image folder. The page reloads its state afterwards."""
-        coco = _inside_root(Path(payload["coco"]), store.root)
+        """Switch to another COCO file / image folder. The page reloads its state afterwards.
+        No ``coco`` starts from the image folder alone; ``preannotate`` is --preannotate's score."""
+        coco = _inside_root(Path(payload["coco"]), store.root) if payload.get("coco") else None
         images = _inside_root(Path(payload["images"]), store.root)
         out = _inside_root(Path(payload["out"]), store.root) if payload.get("out") else None
         pred = _inside_root(Path(payload["pred"]), store.root) if payload.get("pred") else None
@@ -250,17 +348,19 @@ def build_app(store: Store) -> FastAPI:
             raise HTTPException(400, f"the output must be a .json file: {out.name}")
         if out and out in (coco, pred):
             raise HTTPException(400, "the output would overwrite the file being read")
-        if not coco.is_file():
+        if coco and not coco.is_file():
             raise HTTPException(400, f"no such file: {coco}")
         if not images.is_dir():
             raise HTTPException(400, f"no such folder: {images}")
         if pred and not pred.is_file():
             raise HTTPException(400, f"no such file: {pred}")
+        preannotate = payload.get("preannotate")
         try:
             with store.lock:
-                store.load(coco, images, out, pred)
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-            raise HTTPException(400, f"cannot read {coco.name}{' / ' + pred.name if pred else ''}: {e}") from e
+                store.load(coco, images, out, pred, float(preannotate) if preannotate is not None else None)
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as e:
+            what = " / ".join(x.name for x in (coco, pred) if x) or images.name
+            raise HTTPException(400, f"cannot read {what}: {e}") from e
         return store.state()
 
     app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
@@ -279,7 +379,17 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--coco", type=Path, default=DEFAULT_DATA / "annotations" / "tier_b" / "all_coco.json")
     p.add_argument("--images", type=Path, default=DEFAULT_DATA / "images" / "all")
-    p.add_argument("--out", type=Path, default=None, help="default: <coco>_reviewed.json beside the input")
+    p.add_argument(
+        "--no-coco",
+        action="store_true",
+        help="no annotation file: start from the images in --images (tiles nobody has annotated yet)",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="default: <coco>_reviewed.json beside the input; with --no-coco, <images>/<folder name>_coco.json",
+    )
     p.add_argument(
         "--root",
         type=Path,
@@ -295,15 +405,33 @@ def main() -> None:
     p.add_argument(
         "--pred-min-score", type=float, default=0.05, help="detections below this score are not loaded (default 0.05)"
     )
+    p.add_argument(
+        "--preannotate",
+        type=float,
+        default=None,
+        metavar="SCORE",
+        help="when a review starts (no --out yet), the --pred detections at or above SCORE become the "
+        "annotations of the images that have none",
+    )
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--no-browser", action="store_true")
     args = p.parse_args()
 
+    if args.preannotate is not None and args.pred is None:
+        p.error("--preannotate needs --pred")
     store = Store(
-        args.coco.resolve(), args.images.resolve(), args.out, args.root.resolve(), args.pred, args.pred_min_score
+        None if args.no_coco else args.coco.resolve(),
+        args.images.resolve(),
+        args.out,
+        args.root.resolve(),
+        args.pred,
+        args.pred_min_score,
+        args.preannotate,
     )
     print(f"  boxes : {len(store.coco['annotations'])} in {len(store.coco['images'])} images")
-    print(f"  read  : {store.coco_path}")
+    print(f"  read  : {store.coco_path or '(no annotation file: the images of the folder)'}")
+    if pre := store.review.get("preannotated"):
+        print(f"  pre   : {len(pre['ids'])} boxes from the detections at score >= {pre['min_score']}")
     if store.pred_info:
         info = store.pred_info
         print(

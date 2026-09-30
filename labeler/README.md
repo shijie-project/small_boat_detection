@@ -37,6 +37,36 @@ or the one `tools/inference/torch_inf_dir.py --coco <file>` writes. Detections u
 `--pred-min-score` (0.05) are not loaded. The file can also be picked in the page (**O**, field
 **Predictions**).
 
+## Pre-annotating tiles nobody has annotated yet
+
+With no annotation file, the labeler starts from a folder of tiles, and the detector's boxes can be
+the starting annotations. For a scene cut by `tools/dataset/tile_satellite.py` (or the dashboard's
+Manual split):
+
+```powershell
+# 1. the detector over the tiles: writes <scene>\inf_det\predictions.json and detections.json
+python tools\inference\torch_inf_dir.py -c configs\dfine\DFine-S-GoogleEarth.yml `
+    -r outputs\dfine_s_google_earth\<run>\best_stg1.pth -i ..\data\satellite_images\split_images\<scene> -d cuda
+
+# 2. the review, starting from its boxes at score >= 0.5
+python labeler\server.py --no-coco --images ..\data\satellite_images\split_images\<scene> `
+    --pred ..\data\satellite_images\split_images\<scene>\inf_det\predictions.json --preannotate 0.5
+```
+
+With an annotation file, `--preannotate` fills the images marked `"annotated": false` in it
+(`../data/annotations/tier_c/all_coco.json` marks the commercial tiles cut after the annotation
+round), or, without the mark, the images with no boxes; a tile annotated as empty keeps
+`"annotated": true` and stays empty.
+
+`--no-coco` reads the image list from the folder; `detections.json` beside the predictions says
+which tile each `image_id` is. `--preannotate` fills the images that have no boxes, once, when the
+review starts: the boxes come in unreviewed, to confirm (Space), correct or delete, and a missed
+vessel is drawn by hand. The output defaults to `<scene>\<scene>_coco.json` (COCO, category `ship`)
+with its review sidecar; reopening the same folder reads them back instead of pre-annotating again.
+The predictions stay loaded beside the boxes, so a box moved off its detection still shows where the
+model put it. In the page: **O**, leave **Annotations** empty, fill **Images** and **Predictions**,
+tick **Pre-annotate**.
+
 ## What it reads and writes
 
 | | |

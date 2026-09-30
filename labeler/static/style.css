@@ -323,6 +323,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 .picked .target { align-items: center; }
 .picked .target label { display: flex; gap: 4px; align-items: center; color: var(--text); }
+.picked .target input.score { flex: none; width: 64px; }
 
 /* predictions: read-only, drawn dashed in their own colour */
 :root { --pred: #35c7ff; }

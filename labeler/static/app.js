@@ -55,6 +55,7 @@ async function boot(st) {
   S.status = st.review.status || {};
   S.deleted = st.review.deleted || [];
   S.edited = new Set(st.review.edited || []);
+  S.preannotated = st.review.preannotated || null;   // {min_score, ids}: the boxes the model started
   // past the deleted and edited ids too: a box drawn after a reload must not take the id of one
   // deleted before it, or the review record would name two different boxes by one id
   S.nextId = 1 + Math.max(0, ...S.anns.map((a) => a.id), ...S.deleted.map((d) => d.id), ...S.edited);
@@ -63,10 +64,13 @@ async function boot(st) {
   S.dirty = false;
   loadPredictions(st);
   imgCache.clear();
-  document.title = `ship box review — ${base(st.paths.coco)}`;
-  $('#source').textContent = `${base(st.paths.coco)}${S.hasPred ? ' + ' + base(st.paths.pred) : ''}  ←  ${base(st.paths.images)}\\`;
+  // without an annotation file, the file the review writes is the one it keeps coming back to
+  const ann = base(st.paths.coco || st.paths.out);
+  document.title = `ship box review — ${ann}`;
+  $('#source').textContent = `${ann}${S.hasPred ? ' + ' + base(st.paths.pred) : ''}  ←  ${base(st.paths.images)}\\`;
   $('#source').title =
-    `Annotations: ${st.paths.coco}\nImages: ${st.paths.images}\nWrites to: ${st.paths.out}\n` +
+    `Annotations: ${st.paths.coco || '(none: the images of the folder)'}\nImages: ${st.paths.images}\nWrites to: ${st.paths.out}\n` +
+    (S.preannotated ? `Pre-annotated: ${S.preannotated.ids.length} boxes from the predictions at score ≥ ${S.preannotated.min_score}\n` : '') +
     (S.hasPred ? `Predictions: ${st.paths.pred} (${st.pred.n_kept} of ${st.pred.n_read}, score ≥ ${st.pred.min_score})\n` : '') +
     `Browsable from: ${st.paths.root}`;
   const warn = st.missing_images?.length
@@ -233,7 +237,10 @@ async function save() {
   try {
     const body = {
       annotations: S.anns,
-      review: { status: S.status, deleted: S.deleted, edited: [...S.edited] },
+      review: {
+        status: S.status, deleted: S.deleted, edited: [...S.edited],
+        ...(S.preannotated ? { preannotated: S.preannotated } : {}),
+      },
     };
     const r = await fetch('/api/save', {
       method: 'POST',
@@ -867,18 +874,23 @@ const P = { cwd: null, coco: null, images: null, out: null, pred: '', outEdited:
 const pickTarget = () => document.querySelector('input[name="target"]:checked').value;
 
 const dirOf = (p) => String(p).replace(/[\\/][^\\/]*$/, '');
-const autoOut = (coco) => (coco ? coco.replace(/\.json$/i, '') + '_reviewed.json' : '');
+/* Beside the annotation file, or, without one, in the image folder under the folder's name. */
+const autoOut = (coco, images) => {
+  if (coco) return coco.replace(/\.json$/i, '') + '_reviewed.json';
+  const dir = String(images || '').replace(/[\\/]+$/, '');
+  return dir ? `${dir}\\${base(dir)}_coco.json` : '';
+};
 
 async function openPicker() {
   P.coco = S.paths.coco;
   P.images = S.paths.images;
   P.out = S.paths.out;
   P.pred = S.paths.pred || '';
-  P.outEdited = S.paths.out !== autoOut(S.paths.coco);
+  P.outEdited = S.paths.out !== autoOut(S.paths.coco, S.paths.images);
   $('#picker').hidden = false;
   pickMsg('Type or paste the paths, or pick them in the browser below');
   showPicked();
-  await browse(dirOf(S.paths.coco));            // start in the annotations folder
+  await browse(S.paths.coco ? dirOf(S.paths.coco) : S.paths.images);   // where the data is
 }
 
 /* The three paths are inputs: browsing fills them in, and typing or pasting a path works just as
@@ -886,7 +898,7 @@ async function openPicker() {
 function showPicked() {
   $('#pickcoco').value = P.coco || '';
   $('#pickimages').value = P.images || '';
-  $('#pickout').value = P.outEdited ? (P.out || '') : autoOut(P.coco);
+  $('#pickout').value = P.outEdited ? (P.out || '') : autoOut(P.coco, P.images);
   $('#pickpred').value = P.pred || '';
   for (const el of document.querySelectorAll('.picked input')) el.classList.remove('bad');
 }
@@ -896,8 +908,8 @@ function readPicked() {
   P.images = $('#pickimages').value.trim();
   P.pred = $('#pickpred').value.trim();
   const out = $('#pickout').value.trim();
-  P.out = out || autoOut(P.coco);
-  P.outEdited = !!out && out !== autoOut(P.coco);
+  P.out = out || autoOut(P.coco, P.images);
+  P.outEdited = !!out && out !== autoOut(P.coco, P.images);
 }
 
 function pickMsg(msg, cls = '') {
@@ -982,10 +994,15 @@ function detail(text) {
 
 async function applyPicker() {
   readPicked();
-  if (!P.coco || !P.images) {
-    pickMsg('Both the annotation file and the image folder are needed', 'error');
-    $('#pickcoco').classList.toggle('bad', !P.coco);
-    $('#pickimages').classList.toggle('bad', !P.images);
+  if (!P.images) {                         // the annotation file is optional, the images are not
+    pickMsg('The image folder is needed', 'error');
+    $('#pickimages').classList.add('bad');
+    return;
+  }
+  const pre = $('#pickpre').checked;
+  if (pre && !P.pred) {
+    pickMsg('Pre-annotating needs a predictions file', 'error');
+    $('#pickpred').classList.add('bad');
     return;
   }
   if (S.dirty) await save();
@@ -993,7 +1010,10 @@ async function applyPicker() {
   const r = await fetch('/api/open', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ coco: P.coco, images: P.images, out: P.out, pred: P.pred || null }),
+    body: JSON.stringify({
+      coco: P.coco || null, images: P.images, out: P.out, pred: P.pred || null,
+      preannotate: pre ? Number($('#pickprescore').value) : null,
+    }),
   });
   if (!r.ok) { pickMsg(detail(await r.text()), 'error'); return; }
   $('#picker').hidden = true;
@@ -1066,7 +1086,7 @@ for (const el of document.querySelectorAll('.picked input')) {
   // only the Write-to field is rewritten while typing, so the caret is never moved under the hand
   el.addEventListener('input', () => {
     readPicked();
-    if (el.id === 'pickcoco' && !P.outEdited) $('#pickout').value = autoOut(P.coco);
+    if ((el.id === 'pickcoco' || el.id === 'pickimages') && !P.outEdited) $('#pickout').value = autoOut(P.coco, P.images);
     el.classList.remove('bad');
   });
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyPicker(); });

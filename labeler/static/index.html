@@ -82,7 +82,7 @@
   <div class="picked">
     <div>
       <span class="lbl">Annotations</span>
-      <input id="pickcoco" type="text" spellcheck="false" placeholder="Full path of the COCO json; paste or pick below">
+      <input id="pickcoco" type="text" spellcheck="false" placeholder="Full path of the COCO json; empty: start from the images of the folder below">
       <button class="goto" data-go="coco" title="Show it in the browser below">Locate</button>
     </div>
     <div>
@@ -92,8 +92,8 @@
     </div>
     <div>
       <span class="lbl">Write to</span>
-      <input id="pickout" type="text" spellcheck="false" placeholder="Empty: named after the annotation file">
-      <button class="goto" data-go="reset" title="Name it after the annotation file again">Auto</button>
+      <input id="pickout" type="text" spellcheck="false" placeholder="Empty: named after the annotation file, or the image folder">
+      <button class="goto" data-go="reset" title="Name it after the annotation file (or the image folder) again">Auto</button>
     </div>
     <div>
       <span class="lbl">Predictions</span>
@@ -105,6 +105,11 @@
       <span class="lbl">A clicked json fills</span>
       <label><input type="radio" name="target" value="coco" checked> Annotations</label>
       <label><input type="radio" name="target" value="pred"> Predictions</label>
+    </div>
+    <div class="target" title="Only when a review starts: once the Write-to file exists, it is what opens">
+      <span class="lbl">Pre-annotate</span>
+      <label><input id="pickpre" type="checkbox"> the images without boxes, from the predictions at score ≥</label>
+      <input id="pickprescore" class="score" type="number" min="0" max="1" step="0.05" value="0.5">
     </div>
   </div>
   <div id="crumbs"></div>

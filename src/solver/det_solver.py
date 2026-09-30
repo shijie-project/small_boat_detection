@@ -154,10 +154,34 @@ class DetSolver(BaseSolver):
         print(f"Training time {datetime.timedelta(seconds=int(total_time))}")
 
     def val(self):
+        """``--test-only``: score the checkpoint and leave, in ``output_dir``, the COCOeval results
+        (``eval.pth``) and the detections themselves (``predictions.json``, COCO results: one
+        ``{image_id, category_id, bbox: [x, y, w, h], score}`` per box, in the image ids and
+        category ids of the val annotation file, every box that was scored)."""
         self.eval()
+        self.evaluator.keep_predictions = True
         _, coco_evaluator = self._evaluate()
+        predictions = coco_evaluator.gathered_predictions("bbox")  # every rank takes part
         if self.output_dir:
             dist_utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, self.output_dir / "eval.pth")
+            if dist_utils.is_main_process():
+                self._write_predictions(predictions, self.output_dir / "predictions.json")
+
+    @staticmethod
+    def _write_predictions(predictions: list, path):
+        """COCO results json. The values are not rounded: a box of a few pixels sits near an IoU
+        threshold often enough that rounding to 0.01 px moved a metric by 2e-4 when the file was
+        scored again, where the unrounded file reproduces every one exactly."""
+        rows = [
+            {"image_id": p["image_id"], "category_id": p["category_id"], "bbox": p["bbox"], "score": p["score"]}
+            for p in predictions
+        ]
+        temporary = path.with_name(path.name + ".tmp")
+        with temporary.open("w") as f:
+            json.dump(rows, f)
+        temporary.replace(path)
+        images = len({r["image_id"] for r in rows})
+        print(f"{len(rows)} predictions over {images} images written to {path}")
 
     def _evaluates(self, epoch: int, stage2_start: int) -> bool:
         """

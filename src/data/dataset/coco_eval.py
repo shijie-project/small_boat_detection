@@ -31,12 +31,18 @@ class CocoEvaluator:
     per-image results across ranks; ``accumulate`` and ``summarize`` produce the usual table.
     Dataset-specific evaluators subclass this and override ``_build_coco_eval`` for other
     COCOeval parameters, or ``filter_prediction`` to drop detections before scoring.
+
+    With ``keep_predictions`` set, the scored detections are also kept, as COCO result dicts,
+    for ``gathered_predictions`` to hand back after the pass. It is off by default: a pass
+    over the AI-TOD test split is about two million detections, which a validation during
+    training has no use for.
     """
 
     def __init__(self, coco_gt: COCO, iou_types):
         assert isinstance(iou_types, (list, tuple))
         self.coco_gt = copy.deepcopy(coco_gt)
         self.iou_types = list(iou_types)
+        self.keep_predictions = False
         self.cleanup()
 
     def _build_coco_eval(self, iou_type):
@@ -48,6 +54,7 @@ class CocoEvaluator:
         self.coco_eval = {iou_type: self._build_coco_eval(iou_type) for iou_type in self.iou_types}
         self.img_ids = []
         self.eval_imgs = {k: [] for k in self.iou_types}
+        self.predictions = {k: [] for k in self.iou_types}
 
     def update(self, predictions):
         img_ids = list(np.unique(list(predictions.keys())))
@@ -55,6 +62,8 @@ class CocoEvaluator:
 
         for iou_type in self.iou_types:
             results = self.prepare(predictions, iou_type)
+            if self.keep_predictions:
+                self.predictions[iou_type].extend(results)
             coco_eval = self.coco_eval[iou_type]
 
             # suppress pycocotools prints
@@ -79,6 +88,20 @@ class CocoEvaluator:
             coco_eval.params.imgIds = img_ids
             coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
             coco_eval._evalImgs_cpp = eval_imgs
+
+    def gathered_predictions(self, iou_type="bbox"):
+        """
+        Every rank's kept detections as one list of COCO result dicts, the shape
+        ``COCO.loadRes`` reads. Every rank must call it (it is an all_gather). An image a
+        distributed sampler handed to two ranks, to pad the last batch, keeps the detections of
+        the first rank that had it, as ``merge`` keeps its first evaluation.
+        """
+        merged, seen = [], set()
+        for rank_results in dist_utils.all_gather(self.predictions[iou_type]):
+            new = {r["image_id"] for r in rank_results} - seen
+            merged.extend(r for r in rank_results if r["image_id"] in new)
+            seen |= new
+        return merged
 
     def accumulate(self):
         for coco_eval in self.coco_eval.values():

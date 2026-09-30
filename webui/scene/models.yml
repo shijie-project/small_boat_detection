@@ -1,0 +1,10 @@
+# The models the scene page offers, first one the default. Paths are relative to the project root.
+# An entry whose files are missing is left out of the list rather than failing at Detect.
+
+- name: D-FINE-M · Tier B (Stage 2)
+  config: configs/dfine/DFine-M-GoogleEarth.yml
+  checkpoint: outputs/dfine_m_google_earth/2026-09-30_13-11-05/best_stg1.pth
+
+- name: D-FINE-S · Tier B (Stage 2)
+  config: configs/dfine/DFine-S-GoogleEarth.yml
+  checkpoint: outputs/dfine_s_google_earth/2026-09-29_14-47-01/best_stg1.pth

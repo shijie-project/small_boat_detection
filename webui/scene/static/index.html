@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scene Detection</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1c2027; --line: #2c323c; --text: #e6e9ef; --dim: #96a0b0;
+    --accent: #ff7a45; --box: #ff4d4d; --sel: #3ee0ff; --ok: #5ccf7a; --bad: #e5645a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: grid; grid-template-columns: 300px 1fr 280px; grid-template-rows: auto 1fr; height: 100%; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .dim { color: var(--dim); }
+  header a { color: var(--dim); margin-left: auto; }
+  aside { background: var(--panel); overflow-y: auto; padding: 12px 14px; }
+  #left { border-right: 1px solid var(--line); }
+  #right { border-left: 1px solid var(--line); display: flex; flex-direction: column; padding: 0; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+    margin: 16px 0 6px; font-weight: 600; }
+  h2:first-child { margin-top: 0; }
+  label { display: block; color: var(--dim); margin: 8px 0 3px; }
+  select, input, button { font: inherit; color: var(--text); background: #262c35;
+    border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; width: 100%; }
+  input[type=range] { padding: 0; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  button { cursor: pointer; }
+  button:hover { background: #303845; }
+  button.go { margin-top: 12px; background: var(--accent); border-color: var(--accent); color: #191919;
+    font-weight: 600; padding: 8px; }
+  button.go:hover { filter: brightness(1.08); background: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; filter: none; }
+  #bar { height: 6px; background: #262c35; border-radius: 3px; overflow: hidden; margin: 6px 0; }
+  #bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  #stage { color: var(--dim); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .stat { background: #232830; border-radius: 6px; padding: 8px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--dim); font-size: 11px; }
+  .downloads a { display: block; color: var(--text); text-decoration: none; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 5px; margin-bottom: 4px; }
+  .downloads a:hover { background: #262c35; }
+  .downloads a span { color: var(--dim); float: right; }
+  pre#log { background: #101317; border-radius: 5px; padding: 6px; max-height: 160px; overflow: auto;
+    font-size: 11px; color: var(--dim); white-space: pre-wrap; margin: 0; }
+  details summary { cursor: pointer; color: var(--dim); margin-top: 10px; }
+  #viewer { position: relative; min-width: 0; }
+  #osd { position: absolute; inset: 0; }
+  #boxes { position: absolute; inset: 0; pointer-events: none; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--dim); pointer-events: none; }
+  #empty[hidden] { display: none; }
+  #hint { position: absolute; left: 10px; top: 10px; padding: 6px 10px; border-radius: 6px;
+    background: rgba(20,23,28,.9); color: var(--text); font-size: 12px; pointer-events: none; }
+  #hint[hidden] { display: none; }
+  #viewer.drawing #osd { cursor: crosshair; }
+  button.on { background: #5a4a10; border-color: #ffc400; color: #ffe08a; }
+  .area { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; }
+  .area:hover { background: #262c35; }
+  .area span { flex: 1; color: var(--dim); }
+  .area button { width: auto; padding: 1px 7px; }
+  .small { font-size: 12px; margin-top: 4px; }
+  #listHead { padding: 12px 14px 6px; }
+  #list { flex: 1; overflow-y: auto; position: relative; }
+  #list table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  #list th, #list td { text-align: right; padding: 4px 10px; }
+  #list th { position: sticky; top: 0; background: var(--panel); color: var(--dim); font-weight: 500; }
+  #list th:first-child, #list td:first-child { text-align: left; }
+  #list tr.v { cursor: pointer; }
+  #list tr.v:hover { background: #262c35; }
+  #list tr.sel { background: #16404a; }
+  .msg { padding: 7px 9px; border-radius: 5px; margin-top: 8px; }
+  .msg.err { background: #3a2220; color: #ffb3ad; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; background: #262c35; }
+  .pill.done { color: var(--ok); } .pill.failed { color: var(--bad); } .pill.running { color: var(--accent); }
+  /* a narrow window: the viewer on top, the form and the list below it */
+  @media (max-width: 1100px) {
+    html, body { height: auto; }
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 65vh auto auto; height: auto; }
+    #viewer { grid-row: 2; }
+    #left { grid-row: 3; border-right: 0; border-top: 1px solid var(--line); }
+    #right { grid-row: 4; border-left: 0; border-top: 1px solid var(--line); max-height: 60vh; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Small boat detection</h1><span class="dim">· scene detection</span>
+    <a href="docs" target="_blank">API reference ↗</a>
+  </header>
+
+  <aside id="left">
+    <h2>New detection</h2>
+    <label for="scene">Satellite scene</label>
+    <select id="scene"></select>
+    <label for="model">Model</label>
+    <select id="model"></select>
+    <label for="thr">Confidence threshold <b id="thrVal">0.50</b></label>
+    <input id="thr" type="range" min="0.1" max="0.9" step="0.05" value="0.5">
+    <label for="overlap">Tile overlap</label>
+    <select id="overlap">
+      <option value="0" selected>none (boats cut by a border are joined)</option>
+      <option value="64">64 px</option>
+      <option value="128">128 px</option>
+    </select>
+    <label>Mask <span class="dim">· areas to leave out, e.g. buildings</span></label>
+    <div class="row">
+      <button id="maskDraw">Draw area</button>
+      <button id="maskClear">Clear all</button>
+    </div>
+    <div id="maskInfo" class="dim small">No areas: the whole scene is searched.</div>
+    <div id="maskList"></div>
+    <button class="go" id="go">Detect vessels</button>
+    <div id="error"></div>
+
+    <h2>Run</h2>
+    <div id="runInfo" class="dim">No run selected.</div>
+    <div id="bar"><div></div></div>
+    <div id="stage"></div>
+    <div class="stats" id="stats" hidden>
+      <div class="stat"><b id="sVessels">–</b><span>vessels</span></div>
+      <div class="stat"><b id="sTiles">–</b><span>tiles processed</span></div>
+      <div class="stat"><b id="sSize">–</b><span>scene, megapixels</span></div>
+      <div class="stat"><b id="sTime">–</b><span>seconds</span></div>
+      <div class="stat" id="sMaskedBox" hidden><b id="sMasked">–</b><span>set aside by the mask</span></div>
+    </div>
+    <h2 id="dlHead" hidden>Downloads</h2>
+    <div class="downloads" id="downloads"></div>
+    <details><summary>Log</summary><pre id="log"></pre></details>
+
+    <h2>Earlier runs</h2>
+    <select id="history"></select>
+  </aside>
+
+  <main id="viewer">
+    <div id="osd"></div>
+    <canvas id="boxes"></canvas>
+    <div id="hint" hidden>Click to add points · click the first point, double-click or Enter to close ·
+      Backspace undoes a point · Esc cancels</div>
+    <div id="empty">Choose a scene to view it.</div>
+  </main>
+
+  <aside id="right">
+    <div id="listHead"><h2 style="margin:0">Detected vessels <span id="nList" class="pill">0</span></h2>
+      <div id="nMasked" class="dim small" hidden></div></div>
+    <div id="list"><table><thead><tr><th>#</th><th>score</th><th>size px</th></tr></thead><tbody></tbody></table></div>
+  </aside>
+</div>
+
+<script src="vendor/openseadragon.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const FILES = {
+  "detections.csv": "vessel list (CSV)",
+  "detections_coco.json": "vessels (COCO)",
+  "overlay.jpg": "scene overlay (JPG)",
+  "detections.json": "per-tile + merged (JSON)",
+  "predictions.json": "per-tile (COCO results)",
+  "mask.json": "mask (JSON)",
+  "masked.json": "vessels set aside by the mask",
+  "run.json": "run summary",
+  "log.txt": "log",
+};
+const S = { scene: null, run: null, dets: [], masked: [], sel: null, poll: null,
+  mask: [], draft: null, cursor: null, hoverArea: null };
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || res.statusText);
+  return body;
+}
+
+// ------------------------------------------------------------------ viewer
+const viewer = OpenSeadragon({
+  element: $("osd"),
+  showNavigationControl: false,
+  showNavigator: true,
+  navigatorPosition: "BOTTOM_RIGHT",
+  navigatorSizeRatio: 0.16,
+  navigatorAutoFade: false,
+  navigatorBackground: "#000",
+  navigatorDisplayRegionColor: "#ffb020",
+  gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
+  maxZoomPixelRatio: 8,
+  visibilityRatio: 0.2,
+  zoomPerScroll: 1.25,
+  animationTime: 0.35,
+  timeout: 60000,
+});
+const canvas = $("boxes");
+const ctx = canvas.getContext("2d");
+
+function openScene(name) {
+  if (S.scene && S.scene.name === name) return Promise.resolve();
+  $("empty").textContent = "Loading scene…";
+  return api(`api/scene?name=${encodeURIComponent(name)}`).then((info) => new Promise((resolve) => {
+    const longest = Math.max(info.width, info.height);
+    viewer.addOnceHandler("open", () => { S.scene = info; $("empty").hidden = true; draw(); resolve(); });
+    viewer.open({
+      width: info.width, height: info.height, tileSize: info.view_tile, tileOverlap: 0,
+      minLevel: Math.max(0, info.top_level - Math.floor(Math.log2(longest / 256))),
+      maxLevel: info.top_level,
+      getTileUrl: (level, x, y) =>
+        `tile?name=${encodeURIComponent(name)}&level=${level}&x=${x}&y=${y}&v=${info.version}`,
+    });
+  }));
+}
+
+function draw() {
+  const rect = $("viewer").getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + "px"; canvas.style.height = rect.height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  if (!S.scene || !viewer.world.getItemCount()) return;
+  const vp = viewer.viewport;
+  const p0 = vp.imageToViewerElementCoordinates(new OpenSeadragon.Point(0, 0));
+  const p1 = vp.imageToViewerElementCoordinates(new OpenSeadragon.Point(S.scene.width, 0));
+  const s = (p1.x - p0.x) / S.scene.width;
+  const at = ([x, y]) => [p0.x + x * s, p0.y + y * s];
+  S.mask.forEach((poly, i) => {
+    ctx.beginPath();
+    poly.forEach((pt, j) => { const [sx, sy] = at(pt); j ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+    ctx.closePath();
+    ctx.fillStyle = i === S.hoverArea ? "rgba(255,196,0,.32)" : "rgba(255,196,0,.16)";
+    ctx.fill();
+    ctx.strokeStyle = "#ffc400"; ctx.lineWidth = i === S.hoverArea ? 2.5 : 1.5; ctx.setLineDash([]);
+    ctx.stroke();
+  });
+  if (S.draft && S.draft.length) {
+    ctx.beginPath();
+    S.draft.forEach((pt, j) => { const [sx, sy] = at(pt); j ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+    if (S.cursor) ctx.lineTo(...at(S.cursor));
+    ctx.strokeStyle = "#ffc400"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
+    S.draft.forEach((pt, j) => {
+      const [sx, sy] = at(pt);
+      ctx.beginPath(); ctx.arc(sx, sy, j ? 3 : 5, 0, 2 * Math.PI);
+      ctx.fillStyle = j ? "#ffc400" : "#fff"; ctx.fill();
+    });
+  }
+  const MIN = 10;  // a 6 px boat seen from far away is still worth a visible box
+  ctx.setLineDash([3, 3]);
+  for (const d of S.masked) rectOf(d, s, p0, MIN, "#8a93a3", 1);
+  ctx.setLineDash([]);
+  for (const d of S.dets) {
+    if (d.id === S.sel) continue;
+    rectOf(d, s, p0, MIN, "#ff4d4d", 1.5);
+  }
+  const sel = S.dets.find((d) => d.id === S.sel);
+  if (sel) rectOf(sel, s, p0, MIN + 6, "#3ee0ff", 2.5);
+}
+
+function rectOf(d, s, p0, min, color, width) {
+  const [x, y, w, h] = d.bbox;
+  let sx = p0.x + x * s, sy = p0.y + y * s, sw = w * s, sh = h * s;
+  if (sw < min) { sx -= (min - sw) / 2; sw = min; }
+  if (sh < min) { sy -= (min - sh) / 2; sh = min; }
+  ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.strokeRect(sx, sy, sw, sh);
+}
+
+viewer.addHandler("update-viewport", draw);
+window.addEventListener("resize", draw);
+viewer.addHandler("canvas-click", (event) => {
+  if (!event.quick) return;
+  if (S.draft) { addPoint(event.position); event.preventDefaultAction = true; return; }
+  if (!S.dets.length) return;
+  const p = viewer.viewport.viewerElementToImageCoordinates(event.position);
+  const tol = 8 / (viewer.viewport.viewportToImageZoom(viewer.viewport.getZoom(true)) || 1);
+  const hit = S.dets.find(({ bbox: [x, y, w, h] }) =>
+    p.x >= x - tol && p.x <= x + w + tol && p.y >= y - tol && p.y <= y + h + tol);
+  if (hit) { select(hit.id, false); event.preventDefaultAction = true; }
+});
+
+function select(id, zoom) {
+  S.sel = id;
+  document.querySelectorAll("#list tr.v").forEach((tr) => tr.classList.toggle("sel", +tr.dataset.id === id));
+  const row = document.querySelector(`#list tr[data-id="${id}"]`);
+  if (row) {  // scroll the list only: scrollIntoView would move the whole page in the narrow layout
+    const list = $("list"), top = row.offsetTop - list.querySelector("thead").offsetHeight;
+    if (top < list.scrollTop || row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight)
+      list.scrollTop = top - list.clientHeight / 3;
+  }
+  const d = S.dets.find((v) => v.id === id);
+  if (d && zoom) {
+    const [x, y, w, h] = d.bbox, pad = 120;
+    viewer.viewport.fitBounds(viewer.viewport.imageToViewportRectangle(x + w / 2 - pad, y + h / 2 - pad, 2 * pad, 2 * pad));
+  }
+  draw();
+}
+
+function showList() {
+  const body = document.querySelector("#list tbody");
+  body.innerHTML = S.dets.map((d) =>
+    `<tr class="v" data-id="${d.id}"><td>${d.id}</td><td>${d.score.toFixed(2)}</td>` +
+    `<td>${Math.round(d.bbox[2])}×${Math.round(d.bbox[3])}</td></tr>`).join("");
+  body.querySelectorAll("tr.v").forEach((tr) => tr.addEventListener("click", () => select(+tr.dataset.id, true)));
+  $("nList").textContent = S.dets.length;
+  $("nMasked").hidden = !S.masked.length;
+  $("nMasked").textContent = `${S.masked.length} more set aside by the mask (grey dashed boxes)`;
+}
+
+// ------------------------------------------------------------------ mask
+const toImage = (pos) => { const p = viewer.viewport.viewerElementToImageCoordinates(pos); return [p.x, p.y]; };
+
+function startDraft() {
+  if (!S.scene) return;
+  S.draft = []; S.cursor = null;
+  viewer.gestureSettingsMouse.dblClickToZoom = false;
+  $("viewer").classList.add("drawing"); $("hint").hidden = false;
+  $("maskDraw").textContent = "Finish area"; $("maskDraw").classList.add("on");
+  draw();
+}
+
+function endDraft(keep) {
+  if (!S.draft) return;
+  // a double-click lands two clicks on one spot: drop the repeats
+  const pts = S.draft.filter((p, i, a) => !i || Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) > 0.5);
+  S.draft = null; S.cursor = null;
+  viewer.gestureSettingsMouse.dblClickToZoom = true;
+  $("viewer").classList.remove("drawing"); $("hint").hidden = true;
+  $("maskDraw").textContent = "Draw area"; $("maskDraw").classList.remove("on");
+  if (keep && pts.length >= 3) { S.mask.push(pts.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)])); saveMask(); }
+  showMask(); draw();
+}
+
+function addPoint(position) {
+  const pt = toImage(position);
+  const first = S.draft[0];
+  if (first && S.draft.length >= 3) {
+    const a = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(...first));
+    if (Math.hypot(a.x - position.x, a.y - position.y) < 10) { endDraft(true); return; }
+  }
+  S.draft.push(pt); draw();
+}
+
+function showMask() {
+  const n = S.mask.length;
+  $("maskInfo").textContent = n ? `${n} area(s): a vessel centred inside one is set aside, not reported.`
+    : "No areas: the whole scene is searched.";
+  $("maskList").innerHTML = S.mask.map((poly, i) =>
+    `<div class="area" data-i="${i}"><span>Area ${i + 1} · ${poly.length} points</span>` +
+    `<button data-zoom="${i}" title="Zoom to it">⌖</button><button data-del="${i}" title="Remove">×</button></div>`).join("");
+  $("maskList").querySelectorAll(".area").forEach((el) => {
+    el.addEventListener("mouseenter", () => { S.hoverArea = +el.dataset.i; draw(); });
+    el.addEventListener("mouseleave", () => { S.hoverArea = null; draw(); });
+  });
+  $("maskList").querySelectorAll("button[data-del]").forEach((b) => b.addEventListener("click", () => {
+    S.mask.splice(+b.dataset.del, 1); S.hoverArea = null; saveMask(); showMask(); draw();
+  }));
+  $("maskList").querySelectorAll("button[data-zoom]").forEach((b) => b.addEventListener("click", () => {
+    const poly = S.mask[+b.dataset.zoom], xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+    const x0 = Math.min(...xs), y0 = Math.min(...ys), w = Math.max(...xs) - x0, h = Math.max(...ys) - y0;
+    viewer.viewport.fitBounds(viewer.viewport.imageToViewportRectangle(x0 - w * .15, y0 - h * .15, w * 1.3, h * 1.3));
+  }));
+}
+
+async function saveMask() {
+  try {
+    await api(`api/masks?scene=${encodeURIComponent($("scene").value)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ polygons: S.mask }),
+    });
+  } catch (err) { fail(err); }
+}
+
+async function loadSceneMask(name) {
+  const { polygons } = await api(`api/masks?scene=${encodeURIComponent(name)}`);
+  S.mask = polygons; showMask(); draw();
+}
+
+$("maskDraw").addEventListener("click", () => (S.draft ? endDraft(true) : startDraft()));
+$("maskClear").addEventListener("click", () => {
+  if (S.draft) endDraft(false);
+  if (!S.mask.length) return;
+  S.mask = []; saveMask(); showMask(); draw();
+});
+$("osd").addEventListener("mousemove", (e) => {
+  if (!S.draft) return;
+  const r = $("osd").getBoundingClientRect();
+  S.cursor = toImage(new OpenSeadragon.Point(e.clientX - r.left, e.clientY - r.top)); draw();
+});
+$("osd").addEventListener("dblclick", () => { if (S.draft) endDraft(true); });
+document.addEventListener("keydown", (e) => {
+  if (!S.draft || ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (e.key === "Enter") endDraft(true);
+  else if (e.key === "Escape") endDraft(false);
+  else if (e.key === "Backspace") { S.draft.pop(); draw(); e.preventDefault(); }
+});
+
+// ------------------------------------------------------------------ runs
+function showRun(st) {
+  const r = st.request || {};
+  $("runInfo").innerHTML = `<span class="pill ${st.status}">${st.status}</span> ` +
+    `${r.scene ? r.scene.replace(/\.[^.]+$/, "") : ""}<br><span class="dim">${r.model || ""} · threshold ${r.score_threshold ?? ""}</span>`;
+  const idx = st.stages.indexOf(st.stage);
+  let frac = st.status === "done" ? 1 : Math.max(0, idx) / (st.stages.length - 1);
+  if (st.stage === "detecting" && st.progress) {
+    const [a, b] = st.progress, i = st.stages.indexOf("detecting");
+    frac = (i + a / b) / (st.stages.length - 1);
+  }
+  $("bar").firstElementChild.style.width = `${Math.round(frac * 100)}%`;
+  $("stage").textContent = st.status === "running"
+    ? `${st.stage}${st.progress ? ` · ${st.progress[0]}/${st.progress[1]} tiles` : ""}…`
+    : st.status === "failed" ? "The run failed — see the log." : "";
+  $("log").textContent = st.log.join("\n");
+  const sum = st.summary;
+  $("stats").hidden = !sum;
+  if (sum) {
+    $("sVessels").textContent = sum.vessels;
+    $("sTiles").textContent = sum.tiles;
+    $("sSize").textContent = (sum.scene_width * sum.scene_height / 1e6).toFixed(1);
+    $("sTime").textContent = sum.timings.total_s;
+    $("sMaskedBox").hidden = !sum.mask_areas;
+    $("sMasked").textContent = sum.masked ?? 0;
+  }
+  $("dlHead").hidden = !st.files.length;
+  $("downloads").innerHTML = st.files.filter((f) => FILES[f]).map((f) =>
+    `<a href="api/runs/${st.run_id}/files/${f}" download>${FILES[f]}<span>${f.split(".").pop()}</span></a>`).join("");
+}
+
+async function loadRun(id) {
+  clearInterval(S.poll);
+  if (S.draft) endDraft(false);
+  S.run = id; S.dets = []; S.masked = []; S.sel = null; showList(); draw();
+  const st = await api(`api/runs/${id}`);
+  showRun(st);
+  if (st.request.scene) {
+    $("scene").value = st.request.scene;
+    openScene(st.request.scene).catch(fail);
+    // the areas this run left out; a run without a mask shows the scene's saved one
+    const { polygons } = await api(`api/runs/${id}/mask`);
+    if (polygons.length) { S.mask = polygons; showMask(); draw(); } else await loadSceneMask(st.request.scene);
+  }
+  if (st.status === "running") { $("go").disabled = true; S.poll = setInterval(() => poll(id), 1000); }
+  else { $("go").disabled = false; if (st.status === "done") await loadDetections(id); }
+}
+
+async function poll(id) {
+  const st = await api(`api/runs/${id}`).catch(() => null);
+  if (!st || S.run !== id) return;
+  showRun(st);
+  if (st.status !== "running") {
+    clearInterval(S.poll);
+    $("go").disabled = false;
+    await refreshHistory(id);
+    if (st.status === "done") await loadDetections(id);
+  }
+}
+
+async function loadDetections(id) {
+  const { detections, masked } = await api(`api/runs/${id}/detections`);
+  if (S.run !== id) return;
+  S.dets = detections; S.masked = masked; showList(); draw();
+}
+
+async function refreshHistory(selected) {
+  const { runs } = await api("api/runs");
+  $("history").innerHTML = `<option value="">— ${runs.length} run(s) —</option>` + runs.map((r) =>
+    `<option value="${r.run_id}" ${r.run_id === selected ? "selected" : ""}>${r.run_id} · ` +
+    `${(r.scene || "").replace(/\.[^.]+$/, "").slice(0, 38)} · ${r.status === "done" ? r.vessels + " vessels" : r.status}</option>`).join("");
+}
+
+function fail(err) { $("error").innerHTML = `<div class="msg err">${err.message}</div>`; }
+
+$("thr").addEventListener("input", () => { $("thrVal").textContent = (+$("thr").value).toFixed(2); });
+$("scene").addEventListener("change", () => {
+  // the boxes on show belong to the run's scene, not to this one
+  clearInterval(S.poll);
+  if (S.draft) endDraft(false);
+  S.run = null; S.dets = []; S.masked = []; S.sel = null; showList();
+  $("history").value = ""; $("go").disabled = false;
+  openScene($("scene").value).catch(fail);
+  loadSceneMask($("scene").value).catch(fail);
+});
+$("history").addEventListener("change", () => { if ($("history").value) loadRun($("history").value).catch(fail); });
+$("go").addEventListener("click", async () => {
+  $("error").innerHTML = "";
+  if (S.draft) endDraft(true);
+  $("go").disabled = true;
+  try {
+    const { run_id } = await api("api/runs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene: $("scene").value, model: $("model").value,
+        threshold: +$("thr").value, overlap: +$("overlap").value, mask: S.mask }),
+    });
+    await refreshHistory(run_id);
+    await loadRun(run_id);
+  } catch (err) { $("go").disabled = false; fail(err); }
+});
+
+(async () => {
+  try {
+    const [{ scenes }, { models }] = await Promise.all([api("api/scenes"), api("api/models")]);
+    $("scene").innerHTML = scenes.map((s) =>
+      `<option value="${s.name}">${s.stem} (${s.mb} MB)</option>`).join("");
+    $("model").innerHTML = models.map((m) => `<option>${m.name}</option>`).join("");
+    if (!models.length) fail(new Error("No model available: check webui/scene/models.yml"));
+    await refreshHistory();
+    if (scenes.length) { openScene(scenes[0].name).catch(fail); loadSceneMask(scenes[0].name).catch(fail); }
+  } catch (err) { fail(err); }
+})();
+</script>
+</body>
+</html>

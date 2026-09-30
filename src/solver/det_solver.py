@@ -156,8 +156,9 @@ class DetSolver(BaseSolver):
     def val(self):
         """``--test-only``: score the checkpoint and leave, in ``output_dir``, the COCOeval results
         (``eval.pth``) and the detections themselves (``predictions.json``, COCO results: one
-        ``{image_id, category_id, bbox: [x, y, w, h], score}`` per box, in the image ids and
-        category ids of the val annotation file, every box that was scored)."""
+        ``{image_id, category_id, bbox: [x, y, w, h], score}`` per box, every box that was scored).
+        For a dataset read from a COCO file the ids are that file's, so the predictions line up
+        with it; for a Hub dataset they are the row indices and labels its ground truth uses."""
         self.eval()
         self.evaluator.keep_predictions = True
         _, coco_evaluator = self._evaluate()
@@ -165,15 +166,29 @@ class DetSolver(BaseSolver):
         if self.output_dir:
             dist_utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, self.output_dir / "eval.pth")
             if dist_utils.is_main_process():
-                self._write_predictions(predictions, self.output_dir / "predictions.json")
+                self._write_predictions(predictions, self.output_dir / "predictions.json", self.val_dataloader.dataset)
 
     @staticmethod
-    def _write_predictions(predictions: list, path):
-        """COCO results json. The values are not rounded: a box of a few pixels sits near an IoU
-        threshold often enough that rounding to 0.01 px moved a metric by 2e-4 when the file was
-        scored again, where the unrounded file reproduces every one exactly."""
+    def _write_predictions(predictions: list, path, dataset=None):
+        """COCO results json. The evaluator scores against the dataset's own ground truth, whose
+        image ids are row indices and category ids labels; a dataset that knows its source file's
+        ids (``source_image_ids``, ``source_category_ids``, as CocoDetection does) has them put
+        back. The values are not rounded: a box of a few pixels sits near an IoU threshold often
+        enough that rounding to 0.01 px moved a metric by 2e-4 when the file was scored again,
+        where the unrounded file reproduces every one exactly."""
+        while isinstance(dataset, torch.utils.data.Subset):
+            dataset = dataset.dataset
+        image_ids = getattr(dataset, "source_image_ids", None)
+        category_ids = getattr(dataset, "source_category_ids", None)
         rows = [
-            {"image_id": p["image_id"], "category_id": p["category_id"], "bbox": p["bbox"], "score": p["score"]}
+            {
+                "image_id": image_ids[p["image_id"]] if image_ids is not None else p["image_id"],
+                "category_id": category_ids.get(p["category_id"], p["category_id"])
+                if category_ids
+                else p["category_id"],
+                "bbox": p["bbox"],
+                "score": p["score"],
+            }
             for p in predictions
         ]
         temporary = path.with_name(path.name + ".tmp")

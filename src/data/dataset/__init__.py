@@ -3,7 +3,8 @@ Dome-DETR: DETR with Density-Oriented Feature-Query Manipulation for Efficient T
 Copyright (c) 2025 The Dome-DETR Authors. All Rights Reserved.
 
 Datasets are read straight from the Hugging Face Hub: one ``HFDetection`` subclass per repo,
-and one evaluator per dataset protocol.
+and one evaluator per dataset protocol. ``CocoDetection`` is the one kept on disk instead, a COCO
+file and a folder of images (the AEA small-boat tiles).
 """
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "AITOD_CLASSES",
     "AITODDetection",
     "AITODEvaluator",
+    "CocoDetection",
     "VOC_CLASSES",
     "VOCDetection",
     "VOCEvaluator",
@@ -22,6 +24,7 @@ __all__ = [
 
 from .aitod_detection import AITOD_CLASSES, AITODDetection
 from .aitod_eval import AITODEvaluator
+from .coco_detection import CocoDetection
 from .hf_detection import HFDetection, get_coco_api_from_dataset
 from .visdrone_detection import VISDRONE_CLASSES, VisDroneDetection
 from .visdrone_eval import VisDroneEvaluator

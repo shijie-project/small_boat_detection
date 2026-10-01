@@ -5,6 +5,10 @@ task: detection
 # split 80/20 by tools/annotation/random_split_coco.py, seed 42, stratified on empty / non-empty:
 #   train 561 tiles, 1,035 boxes, 59 empty
 #   val   140 tiles,   264 boxes, 15 empty
+# The files read here are those splits with the boxes of the labeler's review
+# (tier_b/all_coco_reviewed.json, 2026-09-30: 221 boxes edited, 14 deleted): the same tiles, and
+#   train 561 tiles, 1,034 boxes;  val 140 tiles, 266 boxes
+# train_coco.json / val_coco.json keep the boxes as annotated, which the runs before 2026-10 read.
 # A tile holds 1.8 boats on average and at most 15. Boxes are 5-20 px on the long side (10th-90th
 # percentile), the same scale as the rest of AEA.
 #
@@ -19,9 +23,9 @@ __include__: ['./aea_detection.yml']
 train_dataloader:
   dataset:
     img_folder: ../data/images/all
-    ann_file: ../data/annotations/tier_b/train_coco.json
+    ann_file: ../data/annotations/tier_b/train_coco_reviewed.json
 
 val_dataloader:
   dataset:
     img_folder: ../data/images/all
-    ann_file: ../data/annotations/tier_b/val_coco.json
+    ann_file: ../data/annotations/tier_b/val_coco_reviewed.json

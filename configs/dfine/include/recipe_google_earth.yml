@@ -1,0 +1,26 @@
+# The Tier B (Google Earth) fine-tuning recipe: recipe_aea.yml cut to 32 epochs, the last 8 on
+# clean images, from what the 160-epoch D-FINE-S run on it showed
+# (outputs/dfine_s_google_earth/2026-09-29_12-20-10, val AP by epoch):
+#   - it peaks early: 45.7 at epoch 15, 44.4-45.7 through epochs 11-29, then down to ~43 by 50 while
+#     the training loss keeps falling. 561 tiles are 70 iterations an epoch, and the AI-TOD
+#     checkpoint already knows the task: past ~25 epochs it only memorises the training tiles
+#   - switching the augmentations off pays at once and not for long: +1.5 AP at epoch 100 (43.2 to
+#     44.7), held for 6 epochs, then down to 42.0 by the end, the two rate decays notwithstanding
+# So: 24 augmented epochs, the plateau's middle, then 8 clean ones, with the rate halved as the
+# augmentations stop and again 4 epochs later, so the clean phase refines rather than refits.
+# The rates, the weight decay and the EMA are recipe_aea.yml's. Every epoch is validated, and a
+# D-FINE-S run takes ~15 minutes.
+
+__include__: ['./recipe_aea.yml']
+
+lr_scheduler:
+  milestones: [24, 28]
+
+epoches: 32
+train_dataloader:
+  dataset:
+    transforms:
+      policy:
+        epoch: 24
+  collate_fn:
+    stop_epoch: 24

@@ -1,5 +1,5 @@
 # D-FINE-S on Tier B, the Google Earth research tiles (../dataset/google_earth_detection.yml): the
-# DFine-S-AITOD.yml architecture on the AEA fine-tuning recipe (include/recipe_aea.yml), fine-tuned
+# DFine-S-AITOD.yml architecture on the Tier B recipe (include/recipe_google_earth.yml), fine-tuned
 # (-t) from the 280-epoch DFine-S-AITOD run, outputs/dfine_s_aitod/2026-09-23_14-29-45/best_stg2.pth
 # (ship-only AI-TOD test AP 64.6). 300 queries, D-FINE's default and the AI-TOD run's, although a
 # tile holds at most 15 boats.
@@ -11,7 +11,7 @@ __include__: [
   './include/optimizer.yml',
   './include/dfine_hgnetv2.yml',
   './include/scale_s.yml',
-  './include/recipe_aea.yml',
+  './include/recipe_google_earth.yml',
 ]
 
 output_dir: ./outputs/dfine_s_google_earth

@@ -1,0 +1,23 @@
+# D-FINE-L on AEA, the small-boat tiles (../dataset/aea_detection.yml): the DFine-L-AITOD.yml
+# architecture on the AEA fine-tuning recipe (include/recipe_aea.yml), fine-tuned (-t) from a
+# DFine-L-AITOD run's best_stg2.pth. 100 queries, the legacy Dome AEA recipe's: a tile holds three or
+# four boats and the most crowded 30.
+
+__include__: [
+  '../dataset/aea_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+  './include/scale_l.yml',
+  './include/recipe_aea.yml',
+]
+
+output_dir: ./outputs/dfine_l_aea
+
+DFINE:
+  encoder: HybridEncoder
+  decoder: DFINETransformer
+
+DFINETransformer:
+  num_queries: 100

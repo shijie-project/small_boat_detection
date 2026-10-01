@@ -1,0 +1,69 @@
+task: detection
+
+# AEA: the small-boat tiles annotated in Label Studio, 1024 x 1024 cuts of 1 m/px nadir satellite
+# scenes, read from disk (../data beside the code, where the webui's LS -> COCO and Train / Val
+# write them). Boats are 5-20 m, so 4-12 px, and a tile holds three or four; one tile in seven holds
+# none, and those stay in as open water to leave alone.
+#
+# The file's one category, ship (id 3, AI-TOD's), is labelled 0, as the ship-only AI-TOD is, so a
+# model fine-tuned from a DFine-<size>-AITOD run keeps its classification head.
+#
+# Augmentation as for AI-TOD (aitod_detection.yml), whose reasons hold here more strongly:
+#   - apparent size is a feature at a fixed ground sample distance: never shrink a tile (no
+#     RandomZoomOut, which would leave the boats at 2-3 px), only magnify, with RandomIoUCrop
+#   - orientation carries no information: both flips and the 90-degree rotations, the 8-fold
+#     dihedral group taken exactly, without resampling
+#   - what varies between scenes is illumination and sea state: RandomPhotometricDistort
+# The tiles keep their size: Resize to 1024 only scales a zoomed-in crop back up.
+
+evaluator:
+  type: AITODEvaluator  # up to 1500 detections, the very tiny / tiny / small size bands
+  iou_types: ['bbox', ]
+
+num_classes: 1
+
+# the size the tiles are fed at, which the inference tools read too (their default is 800)
+eval_spatial_size: [1024, 1024]
+
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: ../data/images/train
+    ann_file: ../data/annotations/train_coco.json
+    classes: [ship]
+    transforms:
+      type: Compose
+      ops:
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: RandomVerticalFlip}
+        - {type: RandomRotate90}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        # from this epoch on the listed augmentations are switched off (the flips and rotations stay)
+        name: stop_epoch
+        epoch: 72
+        ops: ['RandomPhotometricDistort', 'RandomIoUCrop']
+  shuffle: True
+  num_workers: 4
+
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: ../data/images/val
+    ann_file: ../data/annotations/val_coco.json
+    classes: [ship]
+    transforms:
+      type: Compose
+      ops:
+        - {type: Resize, size: [1024, 1024]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+  shuffle: False
+  num_workers: 4

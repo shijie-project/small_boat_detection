@@ -1,0 +1,55 @@
+# The AEA fine-tuning recipe: 160 epochs at batch 8 from a DFine-<size>-AITOD checkpoint (-t), the
+# last 60 on clean images. The legacy Dome AEA recipe (configs/dome/include/aea.yml), carried over.
+#
+# Shared by the AEA and the Tier B (Google Earth) configs.
+# 731 training tiles, 91 iterations an epoch (Tier B: 561 and 70): overfitting, not underfitting, is the risk, hence
+# the doubled weight decay, and the rate decays late and hard (the AI-TOD milestones with gamma
+# 0.8 would barely move it). The EMA horizon is set to a few epochs: 0.9999 averages over ~10k
+# steps, 110 epochs here, so the averaged weights would lag most of the run; 0.998 is ~5 epochs.
+# Multi-scale training is off: it resizes whole batches down to 0.8x, which takes a 6 px boat
+# below what the stride-4 map resolves; RandomIoUCrop, which only magnifies, is the scale jitter.
+# A validation of the 183 val tiles (Tier B: 140) takes seconds, so every epoch is validated.
+# Overrides the defaults of optimizer.yml, runtime.yml, dataloader.yml and the dataset's stop_epoch.
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*(?:norm|bn)).*$'
+      lr: 0.00002
+    -
+      params: '^(?=.*backbone)(?=.*(?:norm|bn)).*$'
+      lr: 0.00002
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0002
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [100, 140]
+  gamma: 0.5
+
+ema:
+  decay: 0.998
+  warmups: 500
+ema_restart_decay: 0.999
+
+epoches: 160
+train_dataloader:
+  dataset:
+    transforms:
+      policy:
+        epoch: 100
+  collate_fn:
+    stop_epoch: 100
+    base_size: 1024
+    base_size_repeat: ~
+  total_batch_size: 8
+
+eval_after: 0
+eval_freq: 1
